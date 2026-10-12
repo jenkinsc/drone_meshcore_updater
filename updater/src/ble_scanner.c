@@ -475,10 +475,22 @@ static int survey_score(const struct ble_scanner_seen *e)
 	return (e->dfu_uuid ? 4 : 0) + (e->name[0] ? 2 : 0);
 }
 
+static ble_scanner_adv_fn s_adv_observer;
+
+void ble_scanner_set_adv_observer(ble_scanner_adv_fn fn)
+{
+	s_adv_observer = fn;
+}
+
 static void survey_rx_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
 			 struct net_buf_simple *ad)
 {
 	ARG_UNUSED(adv_type);
+
+	ble_scanner_adv_fn obs = s_adv_observer;
+	if (obs) {
+		obs(addr, rssi);
+	}
 
 	struct ad_parse ap = { .name = { 0 }, .has_dfu_uuid = false };
 	bt_data_parse(ad, ad_data_cb, &ap);

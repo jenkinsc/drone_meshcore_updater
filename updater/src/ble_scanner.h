@@ -183,6 +183,21 @@ size_t ble_scanner_survey_get(struct ble_scanner_seen *out, size_t max,
  * their device back and not. */
 int ble_scanner_with_radio_paused(int (*fn)(void));
 
+/* ---- Per-advertisement observer ------------------------------------------
+ *
+ * One optional listener that sees *every* advertisement the survey receives,
+ * with its RSSI, before the survey table folds it into a row. The table keeps
+ * only the latest and best RSSI per device, which is the right summary for a
+ * list and the wrong one for deciding whether a link has been *stable*: a dip
+ * between two polls would be invisible. Added for the MeshCore START gate
+ * (src/mc/mc_gate.h), which needs the series, not the summary.
+ *
+ * Runs on the BT RX thread, so it must not block and must not call back into
+ * this file. It is only called while a survey is running. NULL removes it. */
+typedef void (*ble_scanner_adv_fn)(const bt_addr_le_t *addr, int8_t rssi);
+
+void ble_scanner_set_adv_observer(ble_scanner_adv_fn fn);
+
 /* Make a ble_scanner_find_first() that is currently waiting give up, and stop
  * the radio scanning.
  *

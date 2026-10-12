@@ -120,8 +120,38 @@ static uint16_t encode(uint8_t *out)
  * it). k_work_schedule is a no-op when the work is already scheduled, which
  * is exactly the throttle wanted: the first tick after a quiet period sets
  * the deadline and every tick until then just updates the snapshot. */
+static dfu_status_observer_fn observer;
+
+void dfu_status_set_observer(dfu_status_observer_fn fn)
+{
+	observer = fn;
+}
+
+/* Every mutator funnels through mark_dirty(), including when nobody is
+ * subscribed over GATT, so this is the one place that sees every change. */
+static void notify_observer(void)
+{
+	dfu_status_observer_fn fn = observer;
+
+	if (fn == NULL) {
+		return;
+	}
+
+	struct dfu_status_event ev;
+	k_spinlock_key_t key = k_spin_lock(&lock);
+	ev.state   = snap.state;
+	ev.percent = snap.percent;
+	ev.result  = snap.result;
+	ev.attempt = snap.attempt;
+	ev.retries = snap.retries;
+	k_spin_unlock(&lock, key);
+
+	fn(&ev);
+}
+
 static void mark_dirty(bool now)
 {
+	notify_observer();
 	atomic_set(&dirty, 1);
 	if (!atomic_get(&subscribed)) {
 		return;

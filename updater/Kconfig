@@ -1,0 +1,151 @@
+# Application Kconfig.
+#
+# Until the MeshCore command interface there was nothing app-specific to
+# declare here (everything came from prj.conf and board fragments), so this
+# file did not exist. It must end by sourcing Kconfig.zephyr or none of
+# Zephyr's own options are defined.
+
+menu "MeshCore command interface"
+
+config MC_CMD
+	bool "MeshCore command interface over a Wio-SX1262"
+	depends on SOC_NRF52840 && BT
+	select FLASH
+	select FLASH_MAP
+	select GPIO
+	select SPI
+	select ENTROPY_GENERATOR
+	help
+	  Lets one configured MeshCore operator key arm, start and abort a DFU
+	  and read status over LoRa. See updater/src/mc/ and MESHCORE.md.
+	  Hardware: Seeed Wio-SX1262 on a XIAO nRF52840. Enable it with the
+	  build wrapper (build-meshcore.sh), which also applies the devicetree
+	  overlay that wires the radio.
+
+if MC_CMD
+
+config MC_CMD_ENFORCE
+	bool "Refuse every DFU start that did not come from the MeshCore START path"
+	default y
+	help
+	  With this on, dfu_runner_start() refuses (-EPERM) unless the MeshCore
+	  controller has just granted a one-shot permit. That closes the other
+	  ways a run can begin: auto_flash at boot and the SMP TRIGGER_DFU
+	  command. Turn it off only on a bench, and note that "do not begin DFU
+	  automatically" is then no longer guaranteed.
+
+config MC_OPERATOR_PUBKEY
+	string "Operator's MeshCore public key (64 hex characters)"
+	default ""
+	help
+	  The only key whose messages are accepted. Empty means every command is
+	  ignored. Put it in updater/boards/meshcore/operator.conf (git-ignored),
+	  not in a file that is committed. It is compiled in on purpose: it must
+	  not live on the filesystem, which any BLE client can rewrite over SMP.
+
+config MC_NODE_NAME
+	string "Name in the MeshCore advert"
+	default "DroneUpd"
+
+config MC_ADVERT_INTERVAL_S
+	int "Seconds between adverts"
+	default 21600
+	range 600 604800
+	help
+	  Each advert writes a record to flash, and adverts use channel time.
+	  The operator only needs one to add the node as a contact.
+
+config MC_THREAD_STACK
+	int "mc thread stack (bytes)"
+	default 6144
+
+comment "Update gate"
+
+config MC_RSSI_MIN
+	int "Minimum RSSI of the armed target (dBm)"
+	default -75
+	range -120 -30
+	help
+	  START is refused unless the target's advertisements stay at or above
+	  this for the whole hold time. It is a build-time value on purpose:
+	  anything read from the filesystem could be rewritten by any BLE client
+	  over SMP, which would let the gate be weakened from outside.
+
+config MC_GATE_HOLD_MS
+	int "How long RSSI must hold (ms)"
+	default 5000
+	range 5000 120000
+	help
+	  The lower bound is the five seconds the requirement asks for.
+
+config MC_GATE_MAX_GAP_MS
+	int "Longest silence from the target inside the hold window (ms)"
+	default 3000
+	range 500 10000
+
+config MC_GATE_MIN_SAMPLES
+	int "Fewest adverts inside the hold window"
+	default 3
+	range 2 100
+
+config MC_ARM_TIMEOUT_S
+	int "Seconds an ARM stays valid (0 = never)"
+	default 300
+	range 0 86400
+
+comment "LoRa (defaults: MeshCore US preset)"
+
+config MC_FREQ_HZ
+	int "Frequency (Hz)"
+	default 910525000
+
+config MC_BW_HZ
+	int "Bandwidth (Hz)"
+	default 62500
+	help
+	  Must be one the SX126x has: 7810 10420 15630 20830 31250 41670 62500
+	  125000 250000 500000.
+
+config MC_SF
+	int "Spreading factor"
+	default 7
+	range 5 12
+
+config MC_CR
+	int "Coding rate denominator (5 = 4/5)"
+	default 5
+	range 5 8
+
+config MC_PREAMBLE
+	int "Preamble symbols"
+	default 16
+
+config MC_SYNC_WORD
+	hex "Sync word"
+	default 0x12
+
+config MC_TX_POWER_DBM
+	int "TX power (dBm)"
+	default 22
+	range -9 22
+	help
+	  Do not transmit without an antenna fitted: the PA can be damaged.
+
+config MC_OCP_MA
+	int "Over-current protection (mA)"
+	default 140
+
+config MC_LBT_TRIES
+	int "Channel-busy checks before sending anyway"
+	default 6
+	range 0 20
+
+config MC_LBT_RSSI_DBM
+	int "Channel counts as busy above (dBm)"
+	default -85
+
+endif # MC_CMD
+
+endmenu
+
+source "Kconfig.zephyr"

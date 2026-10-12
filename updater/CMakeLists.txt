@@ -9,6 +9,22 @@ list(APPEND BOARD_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 # CONFIG_NORDIC_LEGACY_DFU=y.
 list(APPEND ZEPHYR_EXTRA_MODULES ${CMAKE_CURRENT_SOURCE_DIR}/modules/nordic-legacy-dfu)
 
+# MeshCore command interface (Seeed Wio-SX1262 on a XIAO nRF52840). Opt-in:
+# set MC_WIO_SX1262=1 in the environment (build-meshcore.sh does) or pass
+# -DMC_WIO_SX1262=ON. It is chosen here, before find_package(), because it adds
+# a devicetree overlay and a Kconfig fragment that must be known by then, and
+# because an environment variable reaches the app image through sysbuild
+# whereas an unprefixed -D does not reliably.
+if(DEFINED ENV{MC_WIO_SX1262} OR MC_WIO_SX1262)
+  set(MC_BOARD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/boards/meshcore)
+  list(APPEND EXTRA_DTC_OVERLAY_FILE ${MC_BOARD_DIR}/xiao_ble_wio_sx1262.overlay)
+  list(APPEND EXTRA_CONF_FILE ${MC_BOARD_DIR}/xiao_ble_wio_sx1262.conf)
+  # The operator's key. Git-ignored, so a key is never committed by accident.
+  if(EXISTS ${MC_BOARD_DIR}/operator.conf)
+    list(APPEND EXTRA_CONF_FILE ${MC_BOARD_DIR}/operator.conf)
+  endif()
+endif()
+
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 
 project(drone_meshcore_updater LANGUAGES C CXX VERSION 0.1.0)
@@ -66,4 +82,38 @@ if(CONFIG_WIFI)
     # board that has one always has the other.
     src/wifi_survey.c
   )
+endif()
+
+# MeshCore command interface. Everything under src/mc/ is plain C; only the
+# *_zephyr/radio/permit files need Zephyr. The vendored Ed25519 is the one in
+# MeshCore (orlp, zlib licence); ED25519_NO_SEED removes its OS-RNG seeding,
+# which we do not use (the seed comes from the SoC's entropy source).
+if(CONFIG_MC_CMD)
+  target_sources(app PRIVATE
+    src/mc/mc_zephyr.c
+    src/mc/mc_radio.c
+    src/mc/mc_sx126x.c
+    src/mc/mc_permit.c
+    src/mc/mc_crypto.c
+    src/mc/mc_store.c
+    src/mc/mc_gate.c
+    src/mc/mc_cmd.c
+    src/mc/mc_progress.c
+    src/mc/mc_ctl.c
+    src/mc/mc_evlog.c
+    src/mc/mc_replay.c
+    src/mc/mc_wire.c
+    src/mc/mc_id.c
+    src/mc/mc_node.c
+    src/mc/ed25519/fe.c
+    src/mc/ed25519/ge.c
+    src/mc/ed25519/sc_small.c
+    src/mc/ed25519/sha512.c
+    src/mc/ed25519/sign.c
+    src/mc/ed25519/keypair.c
+    src/mc/ed25519/key_exchange.c
+    src/mc/ed25519/ge_small.c
+  )
+  # MC_ED25519_SMALL drops the 30 KB base-point table (see ge.c / ge_small.c).
+  target_compile_definitions(app PRIVATE ED25519_NO_SEED MC_ED25519_SMALL)
 endif()

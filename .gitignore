@@ -72,3 +72,6 @@ web/firmware/
 
 # esptool >= 5.0.2 for Espressif builds; build.sh creates it (see ensure_esptool).
 .venv-esptool/
+
+# MeshCore operator key (see updater/MESHCORE.md) -- never commit
+updater/boards/meshcore/operator.conf

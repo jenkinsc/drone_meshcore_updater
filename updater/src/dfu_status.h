@@ -228,6 +228,33 @@ void dfu_status_reset(void);
  * use the DFU_STATUS_RESULT_* constants directly. */
 enum dfu_status_result dfu_status_from_dfu_result(int dfu_result);
 
+/* ---- Observer ------------------------------------------------------------
+ *
+ * One optional listener for every change to the snapshot, for code that wants
+ * the run's progress without being a GATT client of it (the MeshCore command
+ * layer, which reports over a different radio). Added for src/mc/ and kept
+ * generic on purpose: it carries the same fields the wire record does and
+ * nothing about who is listening.
+ *
+ * The callback runs on whichever thread produced the change — the DFU runner,
+ * or the BT RX thread for the client library's observers — and after the
+ * snapshot spinlock is released. It must not block and must not call back into
+ * dfu_status_*; post to a queue and return. It fires for progress ticks too,
+ * unthrottled, so keep it to a few instructions.
+ *
+ * Pass NULL to remove it. */
+struct dfu_status_event {
+	uint8_t state;     /* enum dfu_status_state */
+	uint8_t percent;
+	uint8_t result;    /* enum dfu_status_result */
+	uint8_t attempt;
+	uint8_t retries;
+};
+
+typedef void (*dfu_status_observer_fn)(const struct dfu_status_event *ev);
+
+void dfu_status_set_observer(dfu_status_observer_fn fn);
+
 #ifdef __cplusplus
 }
 #endif

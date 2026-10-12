@@ -1,0 +1,45 @@
+/*
+ * Seeed Wio-SX1262 for XIAO, on a XIAO nRF52840 (xiao_ble).
+ *
+ * Applied in addition to boards/xiao_ble.overlay, never instead of it.
+ *
+ * The module's SPI is the XIAO's SPI header (SCK D8 = P1.13, MISO D9 = P1.14,
+ * MOSI D10 = P1.15), which is exactly what the board's own spi2 pinctrl
+ * already selects, so no pin muxing is added here. The control lines are
+ * plain GPIOs, named in zephyr,user so mc_radio.c never mentions a pin number.
+ *
+ *   NSS   D4  P0.04      BUSY  D3  P0.29
+ *   RESET D2  P0.28      RXEN  D5  P0.05
+ *   DIO1  D1  P0.03      DIO2 drives the TX switch; DIO3 powers the TCXO
+ *
+ * **P0.04 and P0.05 are also the board's i2c1 (D4/D5).** The two cannot share
+ * the pins, and nothing in this application uses I2C, so it is disabled.
+ *
+ * The identity page sits in the 4 KB the partition table calls "alignment
+ * slack" between slot1 and the UF2 bootloader (nrf52840_partitions.dtsi).
+ * That region is outside both MCUboot slots and the UF2 bootloader, so neither
+ * an OTA nor a UF2 flash of the app touches it.
+ */
+
+&i2c1 {
+	status = "disabled";
+};
+
+/ {
+	zephyr,user {
+		mc-nss-gpios   = <&gpio0 4  GPIO_ACTIVE_LOW>;
+		mc-reset-gpios = <&gpio0 28 GPIO_ACTIVE_LOW>;
+		mc-busy-gpios  = <&gpio0 29 0>;
+		mc-dio1-gpios  = <&gpio0 3  0>;
+		mc-rxen-gpios  = <&gpio0 5  0>;
+	};
+};
+
+&flash0 {
+	partitions {
+		mc_identity_partition: partition@f3000 {
+			label = "mc-identity";
+			reg = <0x000f3000 DT_SIZE_K(4)>;
+		};
+	};
+};

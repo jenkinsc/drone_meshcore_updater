@@ -38,6 +38,10 @@
 #include "ble_scanner.h"
 #include "ble_pairing.h"
 
+#ifdef CONFIG_MC_CMD
+#include "mc/mc_zephyr.h"
+#endif
+
 LOG_MODULE_REGISTER(app, LOG_LEVEL_INF);
 
 /*
@@ -504,7 +508,25 @@ int main(void)
 	 * armed. An empty mapping means auto-flash has no way to choose a
 	 * bundle, so it would refuse — silently, at the far end of a flight.
 	 */
+#ifdef CONFIG_MC_CMD
+	/* MeshCore command interface: the radio, the identity and the START gate
+	 * live in src/mc/. It never touches the BLE side if it fails to start. */
+	rc = mc_init();
+	if (rc) {
+		LOG_ERR("mc_init rc=%d — MeshCore interface not running", rc);
+	}
+#endif
+#ifdef CONFIG_MC_CMD_ENFORCE
 	if (cfg->auto_flash) {
+		/* A DFU begins only on an authorised MeshCore START; dfu_runner
+		 * would refuse this call anyway, so say why instead of failing. */
+		LOG_WRN("auto_flash is set but ignored: MeshCore enforcement is on, "
+			"a DFU starts only from an authorised START command");
+	}
+	if (false) {
+#else
+	if (cfg->auto_flash) {
+#endif
 		if (cfg->ble_firmware_mapping[0] == '\0') {
 			LOG_ERR("auto_flash is set but ble_firmware_mapping is "
 				"empty — there is no rule saying which bundle "

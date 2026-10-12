@@ -30,6 +30,10 @@
 #include "battery.h"
 #include "app.h"
 
+#ifdef CONFIG_MC_CMD_ENFORCE
+#include "mc/mc_permit.h"
+#endif
+
 LOG_MODULE_REGISTER(dfu_runner, LOG_LEVEL_INF);
 
 /*
@@ -739,6 +743,17 @@ int dfu_runner_start(const char *zip_path, const char *pin,
 		k_mutex_init(&s_lock);
 		inited = true;
 	}
+
+#ifdef CONFIG_MC_CMD_ENFORCE
+	/* With the MeshCore command layer enforcing, a DFU begins only when that
+	 * layer has just granted a permit: right sender, armed target, RSSI gate
+	 * passed. This is what stops auto_flash and an SMP TRIGGER_DFU from
+	 * starting a run on their own. See src/mc/mc_permit.h. */
+	if (!mc_permit_consume()) {
+		LOG_WRN("DFU start refused: no MeshCore START permit");
+		return -EPERM;
+	}
+#endif
 
 	k_mutex_lock(&s_lock, K_FOREVER);
 	if (s_busy) {
