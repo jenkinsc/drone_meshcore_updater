@@ -484,6 +484,29 @@ preserved; this layer only decides *when* a DFU may start and reports its progre
   stable RSSI for 5 s (configurable) and the armed bundle's SHA-256 unchanged.
 * Build: `./build-meshcore.sh` (profiles `lab`, `dryrun`, `dfu`, `prod`). Everything is compiled
   out unless `MC_WIO_SX1262` is set; the stock builds are unchanged.
+* **Build profiles** (`./build-meshcore.sh`):
+
+  | Profile | Command | DFU runner |
+  |---|---|---|
+  | `lab` | `./build-meshcore.sh` | dry run: every check runs, nothing is flashed |
+  | `dryrun` | `MC_PROFILE=dryrun ./build-meshcore.sh` | same as lab, own build directory |
+  | `dfu` | `MC_DISABLE_DRY_RUN=yes MC_PROFILE=dfu ./build-meshcore.sh` | **flashes the target** (refuses to build without the variable) |
+  | `prod` | `MC_PROFILE=prod ./build-meshcore.sh` | flashes; INFO logs compiled out |
+
+* **Commands.** `status`, `scan`, `rssi`, `version`, `battery`, `log` are open. `arm`, `disarm`,
+  `start`, `abort` are operator-only and use single-use tokens. Lab builds add read-only
+  `diag`, `radio`, `ble`, `storage` (uptime/state, LoRa counters and last RSSI/SNR, BLE scan and
+  RSSI stats, identity page and bundle checks).
+* **Safety gates before START:** exact BLE address and type (or Nordic's A+1 DFU address with the
+  DFU service UUID), RSSI average above a threshold and above a hard floor for the hold time
+  (default 5 s, hysteresis 3 dB), the bundle's SHA-256 unchanged since ARM (the armed file is
+  write/delete/rename-locked), and a one-shot authorisation that only the MeshCore thread can
+  grant. Abort is refused once the target's application has been erased.
+* **Progress over MeshCore:** start, 25/50/75 %, verifying and success/failure, rate-limited
+  (one message per 4 s). Every state change is logged as `STATE old -> new : reason`.
+* **Dry run:** `CONFIG_MC_DFU_DRY_RUN` (default `y`) makes START answer `DRY RUN PASS` without
+  touching the target. The real-flash builds must set it to `n` explicitly.
+* **Lab boot report** on the USB console ends with `AIRDFU LAB READY` or `AIRDFU INIT FAILED: <reason>`.
 * Code is in [`updater/src/mc/`](updater/src/mc/), with host tests in `updater/mc-tests/`
   (`make test`). Design and operation: [`updater/MESHCORE.md`](updater/MESHCORE.md).
   Bench plan: [`updater/HARDWARE_VALIDATION.md`](updater/HARDWARE_VALIDATION.md).
