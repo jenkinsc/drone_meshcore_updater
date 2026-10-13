@@ -11,6 +11,14 @@ Today it speaks Nordic Legacy DFU over Bluetooth, which covers nRF52 targets.
 Drop firmware bundles onto it once, then flash targets in the field with no
 laptop — it is a phone, or nothing at all.
 
+> **Fork notice.** This is a fork of
+> [recrof/drone_meshcore_updater](https://github.com/recrof/drone_meshcore_updater)
+> by **Rastislav Vysoky ([@recrof](https://github.com/recrof))**, who wrote the updater: the
+> Nordic Legacy DFU client, the web client, the firmware bundle library and the multi-board
+> build. All of that is his work and is used here unchanged apart from the small, marked hooks
+> listed under [MeshCore command interface](#meshcore-command-interface-fork-addition).
+> Please send general updater bugs and features upstream.
+
 ## Quick start (no toolchain needed)
 
 Everything below happens in **[the web client](https://recrof.github.io/drone_meshcore_updater/)**.
@@ -464,8 +472,46 @@ web/tools/build-single.mjs  bundles everything into one self-contained file
 
 **Editing the config**: the `Config…` button, or a click on `config.txt` in the listing, opens a form over `/lfs1/config.txt` showing every key with its description, its firmware default (click the chip to restore it), and live validation. Only the real `/lfs1/config.txt` opens the editor; a copy in another directory still downloads, since that isn't a file the firmware reads. The filename is always lowercase — uploading one named `CONFIG.TXT` is redirected to `config.txt` (and logged), because LittleFS is case-sensitive and the firmware would silently never read the uppercase one. Values the firmware would silently reject are blocked rather than written, and the encoded size is checked against the parser's 1023-byte buffer. Unknown keys in the file are preserved on save.
 
+## MeshCore command interface (fork addition)
+
+This fork adds an optional layer for the **XIAO nRF52840 + Seeed Wio-SX1262**: an operator
+drives the updater over LoRa with MeshCore direct messages (`status`, `scan`, `rssi`, `arm`,
+`disarm`, `start`, `abort`, `version`, `battery`, `log`). The upstream Nordic BLE DFU is
+preserved; this layer only decides *when* a DFU may start and reports its progress.
+
+* Privileged commands are accepted only from one configured operator public key, each with a
+  single-use token. A DFU never starts on its own: START needs an exact BLE target match, a
+  stable RSSI for 5 s (configurable) and the armed bundle's SHA-256 unchanged.
+* Build: `./build-meshcore.sh` (profiles `lab`, `dryrun`, `dfu`, `prod`). Everything is compiled
+  out unless `MC_WIO_SX1262` is set; the stock builds are unchanged.
+* Code is in [`updater/src/mc/`](updater/src/mc/), with host tests in `updater/mc-tests/`
+  (`make test`). Design and operation: [`updater/MESHCORE.md`](updater/MESHCORE.md).
+  Bench plan: [`updater/HARDWARE_VALIDATION.md`](updater/HARDWARE_VALIDATION.md).
+* Upstream files touched, kept to hooks: `dfu_runner.c` (start gate and dry-run guard),
+  `ble_scanner.c/.h` (advert observer and pin filter), `dfu_status.c/.h` (status observer),
+  `fsx_mgmt.c`, `fsx_stream.c`, `upload_hook.c` (block writes to the armed bundle), `main.c`
+  (start the interface, reset-cause hand-off), `CMakeLists.txt`, `Kconfig`, plus board config and
+  overlay under `updater/boards/meshcore/`. `git diff 8b5814b -- updater/src` shows exactly what changed.
+
+> **Status: not production-ready.** Host-tested and builds, but it has not been run on hardware.
+> Do not use it on a drone or a device you cannot recover until the bench plan has passed.
+
 ## References
 
 - [Nordic nRF Connect Device Manager](https://developer.nordicsemi.com/nRF_Connect_SDK/doc/latest/nrf/samples/mcumgr_smp_svr.html) — the phone/PC clients this project targets
 - [Zephyr mcumgr subsystem](https://docs.zephyrproject.org/latest/services/device_mgmt/mcumgr.html) — SMP protocol reference
 - [MCUboot documentation](https://docs.mcuboot.com/) — dual-slot bootloader used for self-updating
+
+## Credits and licences
+
+* **Original project:** [recrof/drone_meshcore_updater](https://github.com/recrof/drone_meshcore_updater)
+  by Rastislav Vysoky (@recrof). This fork builds on it; the updater and the Nordic Legacy DFU
+  implementation are his. This fork's tree has no top-level licence file, so no licence is granted by this fork beyond what upstream grants; ask the author
+  before redistributing.
+* **MeshCore** protocol and ecosystem: [meshcore-dev/MeshCore](https://github.com/meshcore-dev/MeshCore).
+  The command interface here is an independent implementation of the MeshCore direct-message wire format.
+* **Ed25519:** the key-exchange code in `updater/src/mc/ed25519/` is derived from
+  [orlp/ed25519](https://github.com/orlp/ed25519) by Orson Peters, zlib licence (notice in
+  `updater/src/mc/ed25519/LICENSE`), with MeshCore's key-exchange additions.
+* Third-party components under `modules/`, `zephyr/`, `nrf/` and `nrfxlib/` keep their own licences.
+* The MeshCore layer in this fork was written with Claude (Anthropic).
