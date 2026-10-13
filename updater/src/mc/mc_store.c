@@ -82,7 +82,7 @@ int mc_store_load(struct mc_store *s, const struct mc_flash *fl, struct mc_persi
 		if (!have || (int32_t)(seq - s->seq) > 0) {
 			have = true;
 			s->seq = seq;
-			p->replay_ts = get32(r);
+			p->reserved = get32(r);
 			p->adv_ts = get32(r + 4);
 		}
 	}
@@ -125,7 +125,7 @@ int mc_store_append(struct mc_store *s, const struct mc_persist *p)
 	}
 	uint8_t r[MC_STORE_REC_SIZE];
 
-	put32(r, p->replay_ts);
+	put32(r, p->reserved);
 	put32(r + 4, p->adv_ts);
 	put32(r + 8, s->seq + 1);
 	put32(r + 12, mc_crc32(r, 12));

@@ -74,11 +74,20 @@ static int wait_busy(uint32_t ms)
 {
 	int64_t end = k_uptime_get() + ms;
 
+	int64_t spin_end = k_uptime_get() + 2;
+
+	/* BUSY is normally high for microseconds; the long ones (calibration,
+	 * a regulator or oscillator start) are milliseconds. Spin briefly, then
+	 * sleep, so a slow BUSY never holds the CPU against the BLE threads. */
 	while (gpio_pin_get_dt(&g_busy) > 0) {
 		if (k_uptime_get() > end) {
 			return -ETIMEDOUT;
 		}
-		k_busy_wait(50);
+		if (k_uptime_get() < spin_end) {
+			k_busy_wait(50);
+		} else {
+			k_msleep(1);
+		}
 	}
 	return 0;
 }
@@ -409,6 +418,11 @@ out:
 	 * header mode, but restore the maximum as init did. */
 	mc_sx_pktparams(CONFIG_MC_PREAMBLE, 255, pkt);
 	cmd_w(OP_SET_PKT_PARAMS, pkt, 6);
-	set_rx();
+	if (set_rx() != 0) {
+		LOG_ERR("could not return to RX after TX");
+		if (rc == 0) {
+			rc = -EIO;
+		}
+	}
 	return rc;
 }

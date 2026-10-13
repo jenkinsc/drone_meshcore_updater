@@ -87,6 +87,19 @@ bool mc_addr_equal(const uint8_t armed_le[6], char armed_type,
 	return d == 0;
 }
 
+bool mc_token_ok(const char *s)
+{
+	if (strlen(s) != MC_TOKEN_LEN) {
+		return false;
+	}
+	for (size_t i = 0; i < MC_TOKEN_LEN; i++) {
+		if (!hex_digit(s[i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
 bool mc_bundle_name_ok(const char *s)
 {
 	size_t n = strlen(s);
@@ -141,6 +154,14 @@ bool mc_cmd_privileged(enum mc_cmd_id id)
 	default:
 		return false;
 	}
+}
+
+bool mc_cmd_needs_token(enum mc_cmd_id id)
+{
+	/* arm and start create capability, so they need a fresh single-use
+	 * token. disarm and abort only ever remove it: replaying either is safe,
+	 * and an emergency stop must not wait for a round trip. */
+	return id == MC_CMD_ARM || id == MC_CMD_START;
 }
 
 static const char *const NAMES[MC_CMD_COUNT] = {
@@ -217,7 +238,7 @@ enum mc_parse_err mc_cmd_parse(const char *text, struct mc_cmd *out)
 		return nw == 1 ? MC_PARSE_OK : MC_PARSE_USAGE;
 
 	case MC_CMD_ARM:
-		if (nw < 3 || nw > 4) {
+		if (nw < 3 || nw > 5) {
 			return MC_PARSE_USAGE;
 		}
 		if (!mc_addr_normalise(words[1], out->addr)) {
@@ -228,14 +249,39 @@ enum mc_parse_err mc_cmd_parse(const char *text, struct mc_cmd *out)
 		}
 		strcpy(out->bundle, words[2]);
 		out->addr_type = 'r';
-		if (nw == 4) {
-			if (ieq(words[3], "public")) {
-				out->addr_type = 'p';
-			} else if (!ieq(words[3], "random")) {
+		{
+			/* Optional "random|public" then optional token, in that
+			 * order. A token is six hex digits, which neither type word
+			 * can be, so the two never collide. */
+			size_t i = 3;
+			bool typed = false;
+
+			if (i < nw && (ieq(words[i], "public") || ieq(words[i], "random"))) {
+				out->addr_type = ieq(words[i], "public") ? 'p' : 'r';
+				typed = true;
+				i++;
+			}
+			if (i < nw) {
+				if (!mc_token_ok(words[i])) {
+					return MC_PARSE_USAGE;
+				}
+				strcpy(out->token, words[i]);
+				i++;
+			}
+			(void)typed;
+			return i == nw ? MC_PARSE_OK : MC_PARSE_USAGE;
+		}
+
+	case MC_CMD_START:
+		/* "start" or "start <token>" */
+		if (nw == 2) {
+			if (!mc_token_ok(words[1])) {
 				return MC_PARSE_USAGE;
 			}
+			strcpy(out->token, words[1]);
+			return MC_PARSE_OK;
 		}
-		return MC_PARSE_OK;
+		return nw == 1 ? MC_PARSE_OK : MC_PARSE_USAGE;
 
 	default:
 		return nw == 1 ? MC_PARSE_OK : MC_PARSE_USAGE;

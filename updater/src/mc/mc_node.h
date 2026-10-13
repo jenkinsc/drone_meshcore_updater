@@ -18,8 +18,12 @@
  *      byte), and its source hash is the operator's;
  *   2. its MAC verifies under the secret derived from the operator's public key
  *      (this, not the hash byte, is the authentication);
- *   3. its timestamp is not older than the newest accepted and it is not a
- *      repeat (mc_replay.h).
+ *   3. it is not a repeat of a message handled moments ago (mc_replay.h).
+ *
+ * Replay of a recorded command is not decided here: arm and start carry a
+ * single-use token the node issued (mc_ctl.h), and the remaining privileged
+ * commands only remove capability. The sender's timestamp is not trusted for
+ * ordering — that is what let one wrong clock lock the operator out.
  *
  * Everything else is dropped without a reply: an unknown sender gets no
  * "access denied" to probe against. Messages from anyone else cannot even be
@@ -44,11 +48,13 @@
 extern "C" {
 #endif
 
-/* What must survive a reboot. */
+/* What must survive a reboot: a high-water mark for advert timestamps. */
 struct mc_persist {
-	uint32_t replay_ts;   /* newest accepted operator timestamp */
-	uint32_t adv_ts;      /* newest timestamp we put on an advert */
+	uint32_t reserved;    /* was the replay timestamp; kept so records stay 16 bytes */
+	uint32_t adv_ts;      /* a timestamp we put on an advert (written at most daily) */
 };
+
+#define MC_ADV_PERSIST_S 86400u
 
 struct mc_node_ops {
 	void (*tx)(void *ctx, const uint8_t *frame, size_t len);
@@ -69,6 +75,7 @@ struct mc_node {
 
 	struct mc_replay replay;
 	struct mc_persist saved;
+	uint32_t last_adv_ts;   /* newest advert timestamp sent this boot */
 
 	/* Clock for outgoing timestamps: the best real time we know, advanced by
 	 * uptime. There is no RTC; the operator's own timestamps are the only
@@ -78,7 +85,7 @@ struct mc_node {
 
 	uint32_t rx_frames;
 	uint32_t rx_bad;       /* malformed, wrong MAC, wrong peer */
-	uint32_t rx_replay;
+	uint32_t rx_replay;    /* duplicates suppressed */
 };
 
 void mc_node_init(struct mc_node *n, const struct mc_crypto *cr, struct mc_id *id,

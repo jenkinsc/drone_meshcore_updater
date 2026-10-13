@@ -31,7 +31,7 @@
 #include "app.h"
 
 #ifdef CONFIG_MC_CMD_ENFORCE
-#include "mc/mc_permit.h"
+#include "mc/mc_zephyr.h"
 #endif
 
 LOG_MODULE_REGISTER(dfu_runner, LOG_LEVEL_INF);
@@ -745,12 +745,13 @@ int dfu_runner_start(const char *zip_path, const char *pin,
 	}
 
 #ifdef CONFIG_MC_CMD_ENFORCE
-	/* With the MeshCore command layer enforcing, a DFU begins only when that
-	 * layer has just granted a permit: right sender, armed target, RSSI gate
-	 * passed. This is what stops auto_flash and an SMP TRIGGER_DFU from
-	 * starting a run on their own. See src/mc/mc_permit.h. */
-	if (!mc_permit_consume()) {
-		LOG_WRN("DFU start refused: no MeshCore START permit");
+	/* With the MeshCore command layer enforcing, a DFU begins only from the
+	 * START_AUTHORIZED state, for exactly this bundle and target, called
+	 * from the MeshCore thread. The authorization is consumed atomically
+	 * here. This is what stops auto_flash and an SMP TRIGGER_DFU from
+	 * starting a run on their own. See src/mc/mc_authz.h. */
+	if (!mc_authz_dfu_begin(zip_path, pin)) {
+		LOG_WRN("DFU start refused: not in START_AUTHORIZED");
 		return -EPERM;
 	}
 #endif

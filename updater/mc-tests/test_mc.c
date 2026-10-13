@@ -26,14 +26,13 @@
 #include "../src/mc/mc_store.h"
 #include "../src/mc/ed25519/sha512.h"
 #include <openssl/evp.h>
+#include "test_fake.h"
 
 extern const struct mc_crypto TEST_CRYPTO;
 static const struct mc_crypto *CRY;
 
-static int g_checks, g_fail;
-#define CHECK(c) do { g_checks++; if (!(c)) { g_fail++; \
-	printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
-#define SECTION(n) printf("%s\n", n)
+int g_checks, g_fail;
+void run_ctl_tests(void);   /* test_ctl.c */
 
 /* ---------------------------------------------------------------- vectors -- */
 
@@ -81,70 +80,6 @@ static void load_vectors(const char *path)
 static void seed_for(uint8_t base, uint8_t seed[32])   /* reference FixedRNG */
 {
 	for (int i = 0; i < 32; i++) seed[i] = (uint8_t)(base + i * 7 + 3);
-}
-
-/* ------------------------------------------------------------------- gate -- */
-
-static void feed(struct mc_gate *g, uint32_t from, uint32_t to, uint32_t step, int8_t rssi)
-{
-	for (uint32_t t = from; t <= to; t += step) mc_gate_sample(g, t, rssi);
-}
-
-static void test_gate(void)
-{
-	struct mc_gate g;
-	SECTION("gate");
-
-	mc_gate_init(&g, -75, 5000, 3000, 3);
-	CHECK(mc_gate_check(&g, 0) == MC_GATE_NOT_SEEN);
-
-	/* strong from t=1000, one advert per 500 ms */
-	feed(&g, 1000, 5999, 500, -60);
-	CHECK(mc_gate_check(&g, 5999) == MC_GATE_SETTLING);     /* 4999 ms in */
-	feed(&g, 6000, 6000, 500, -60);
-	CHECK(mc_gate_check(&g, 6000) == MC_GATE_READY);        /* exactly 5000 ms */
-	CHECK(mc_gate_ready(&g, 6000));
-
-	/* the window ends if the target goes quiet */
-	CHECK(mc_gate_check(&g, 6000 + 3001) == MC_GATE_STALE);
-
-	/* one weak sample restarts the clock, however strong the rest */
-	mc_gate_init(&g, -75, 5000, 3000, 3);
-	feed(&g, 0, 2500, 500, -50);
-	mc_gate_sample(&g, 3000, -80);
-	CHECK(mc_gate_check(&g, 3000) == MC_GATE_TOO_WEAK);
-	feed(&g, 3500, 8000, 500, -50);
-	CHECK(mc_gate_check(&g, 8000) == MC_GATE_SETTLING);     /* window began 3500 */
-	feed(&g, 8500, 8500, 500, -50);
-	CHECK(mc_gate_check(&g, 8500) == MC_GATE_READY);
-
-	/* threshold is inclusive */
-	mc_gate_init(&g, -75, 5000, 3000, 3);
-	feed(&g, 0, 5000, 500, -75);
-	CHECK(mc_gate_ready(&g, 5000));
-	mc_gate_init(&g, -75, 5000, 3000, 3);
-	feed(&g, 0, 5000, 500, -76);
-	CHECK(!mc_gate_ready(&g, 5000));
-
-	/* a silence longer than max_gap restarts the window even if it recovers */
-	mc_gate_init(&g, -75, 5000, 3000, 3);
-	feed(&g, 0, 2000, 500, -50);
-	feed(&g, 6000, 6000, 500, -50);       /* 4 s gap */
-	CHECK(mc_gate_check(&g, 6000) == MC_GATE_SETTLING);
-	feed(&g, 6500, 11000, 500, -50);
-	CHECK(mc_gate_ready(&g, 11000));
-
-	/* held long enough but on too few adverts */
-	mc_gate_init(&g, -75, 5000, 6000, 3);
-	mc_gate_sample(&g, 0, -50);
-	mc_gate_sample(&g, 5000, -50);
-	CHECK(mc_gate_check(&g, 5000) == MC_GATE_FEW_SAMPLES);
-
-	/* millisecond clock wrap */
-	mc_gate_init(&g, -75, 5000, 3000, 3);
-	feed(&g, 0xFFFFFF00u, 0xFFFFFF00u, 1, -50);
-	for (uint32_t i = 0; i <= 12; i++) mc_gate_sample(&g, 0xFFFFFF00u + i * 500u, -50);
-	CHECK(mc_gate_ready(&g, 0xFFFFFF00u + 12 * 500u));
 }
 
 /* ----------------------------------------------------------------- parser -- */
@@ -195,6 +130,21 @@ static void test_cmd(void)
 	CHECK(mc_cmd_parse("arm EA:7C:11:0B:55:90 .hidden", &c) == MC_PARSE_BAD_BUNDLE);
 	CHECK(mc_cmd_parse("arm EA:7C:11:0B:55:90 a..b.zip", &c) == MC_PARSE_BAD_BUNDLE);
 
+	/* single-use tokens: six hex digits, last word of arm / start */
+	CHECK(mc_cmd_parse("start abc123", &c) == MC_PARSE_OK && !strcmp(c.token, "abc123"));
+	CHECK(mc_cmd_parse("start ABC123", &c) == MC_PARSE_OK);
+	CHECK(mc_cmd_parse("start", &c) == MC_PARSE_OK && c.token[0] == '\0');
+	CHECK(mc_cmd_parse("start abc12", &c) == MC_PARSE_USAGE);
+	CHECK(mc_cmd_parse("start abc12g", &c) == MC_PARSE_USAGE);
+	CHECK(mc_cmd_parse("start abc1234", &c) == MC_PARSE_USAGE);
+	CHECK(mc_cmd_parse("arm EA:7C:11:0B:55:90 fw.zip abc123", &c) == MC_PARSE_OK &&
+	      c.addr_type == 'r' && !strcmp(c.token, "abc123"));
+	CHECK(mc_cmd_parse("arm EA:7C:11:0B:55:90 fw.zip public abc123", &c) == MC_PARSE_OK &&
+	      c.addr_type == 'p' && !strcmp(c.token, "abc123"));
+	CHECK(mc_cmd_needs_token(MC_CMD_ARM) && mc_cmd_needs_token(MC_CMD_START));
+	CHECK(!mc_cmd_needs_token(MC_CMD_DISARM) && !mc_cmd_needs_token(MC_CMD_ABORT));
+	CHECK(!mc_cmd_needs_token(MC_CMD_STATUS));
+
 	/* privilege table */
 	CHECK(mc_cmd_privileged(MC_CMD_ARM) && mc_cmd_privileged(MC_CMD_DISARM));
 	CHECK(mc_cmd_privileged(MC_CMD_START) && mc_cmd_privileged(MC_CMD_ABORT));
@@ -216,91 +166,10 @@ static void test_cmd(void)
 	CHECK(!mc_addr_equal(a, 'r', b, 1));
 }
 
-/* --------------------------------------------------------------- progress -- */
+/* ------------------------------------------------------------------ evlog -- */
 
-static struct dfu_status_event ev(uint8_t st, uint8_t pct, uint8_t res, uint8_t att)
+static void test_evlog(void)
 {
-	struct dfu_status_event e = { st, pct, res, att, 5 };
-	return e;
-}
-
-static size_t prog(struct mc_progress *p, struct dfu_status_event e, struct mc_progress_msg *m)
-{
-	return mc_progress_update(p, &e, m);
-}
-
-static void test_progress(void)
-{
-	struct mc_progress p;
-	struct mc_progress_msg m[MC_PROGRESS_MAX_MSGS];
-	size_t n;
-	SECTION("progress");
-
-	mc_progress_begin(&p);
-	CHECK(prog(&p, ev(DFU_STATUS_SCANNING, 0, 0, 1), m) == 0);
-	CHECK(prog(&p, ev(DFU_STATUS_CONNECTING, 0, 0, 1), m) == 0);
-	n = prog(&p, ev(DFU_STATUS_UPLOADING, 0, 0, 1), m);
-	CHECK(n == 1 && m[0].kind == MC_MSG_MILESTONE && m[0].milestone == 0);
-	CHECK(prog(&p, ev(DFU_STATUS_UPLOADING, 12, 0, 1), m) == 0);
-	n = prog(&p, ev(DFU_STATUS_UPLOADING, 25, 0, 1), m);
-	CHECK(n == 1 && m[0].milestone == 25);
-	CHECK(prog(&p, ev(DFU_STATUS_UPLOADING, 25, 0, 1), m) == 0);   /* never twice */
-	n = prog(&p, ev(DFU_STATUS_UPLOADING, 51, 0, 1), m);
-	CHECK(n == 1 && m[0].milestone == 50);
-	n = prog(&p, ev(DFU_STATUS_UPLOADING, 99, 0, 1), m);
-	CHECK(n == 1 && m[0].milestone == 75);
-	/* the 100% tick was coalesced away; moving on to VALIDATING proves it */
-	n = prog(&p, ev(DFU_STATUS_VALIDATING, 99, 0, 1), m);
-	CHECK(n == 1 && m[0].milestone == 100);
-	CHECK(prog(&p, ev(DFU_STATUS_DISCONNECTING, 99, 0, 1), m) == 0);
-	n = prog(&p, ev(DFU_STATUS_DONE, 99, DFU_STATUS_RESULT_OK, 1), m);
-	CHECK(n == 1 && m[0].kind == MC_MSG_DONE);
-	CHECK(prog(&p, ev(DFU_STATUS_DONE, 99, DFU_STATUS_RESULT_OK, 1), m) == 0);   /* once */
-
-	/* a jump over milestones still reports each, in order */
-	mc_progress_begin(&p);
-	n = prog(&p, ev(DFU_STATUS_UPLOADING, 80, 0, 1), m);
-	CHECK(n == 4);
-	CHECK(m[0].milestone == 0 && m[1].milestone == 25 && m[2].milestone == 50 && m[3].milestone == 75);
-
-	/* failure mid-transfer: milestones so far, then one FAILED with the reason */
-	mc_progress_begin(&p);
-	prog(&p, ev(DFU_STATUS_UPLOADING, 30, 0, 1), m);
-	n = prog(&p, ev(DFU_STATUS_FAILED, 30, DFU_STATUS_RESULT_TIMEOUT, 1), m);
-	CHECK(n == 1 && m[0].kind == MC_MSG_FAILED && m[0].result == DFU_STATUS_RESULT_TIMEOUT);
-	CHECK(prog(&p, ev(DFU_STATUS_FAILED, 30, DFU_STATUS_RESULT_TIMEOUT, 1), m) == 0);
-
-	/* a retry is announced but does not repeat milestones already sent */
-	mc_progress_begin(&p);
-	prog(&p, ev(DFU_STATUS_UPLOADING, 55, 0, 1), m);                 /* 0,25,50 */
-	n = prog(&p, ev(DFU_STATUS_SCANNING, 0, 0, 2), m);
-	CHECK(n == 1 && m[0].kind == MC_MSG_RETRY && m[0].attempt == 2);
-	CHECK(prog(&p, ev(DFU_STATUS_UPLOADING, 30, 0, 2), m) == 0);
-	n = prog(&p, ev(DFU_STATUS_UPLOADING, 76, 0, 2), m);
-	CHECK(n == 1 && m[0].milestone == 75);
-
-	/* nothing after the run is ended */
-	mc_progress_begin(&p);
-	mc_progress_end(&p);
-	CHECK(prog(&p, ev(DFU_STATUS_UPLOADING, 50, 0, 1), m) == 0);
-}
-
-/* ----------------------------------------------------------- replay/evlog -- */
-
-static void test_replay_evlog(void)
-{
-	struct mc_replay r;
-	SECTION("replay");
-	mc_replay_init(&r, 1000);
-	CHECK(mc_replay_accept(&r, 999, 1) == MC_REPLAY_STALE);
-	CHECK(mc_replay_accept(&r, 1000, 1) == MC_REPLAY_OK);
-	CHECK(mc_replay_accept(&r, 1000, 1) == MC_REPLAY_DUPLICATE);
-	CHECK(mc_replay_accept(&r, 1000, 2) == MC_REPLAY_OK);      /* same second, new message */
-	CHECK(mc_replay_accept(&r, 1001, 3) == MC_REPLAY_OK);
-	CHECK(mc_replay_accept(&r, 1000, 4) == MC_REPLAY_STALE);   /* older than newest */
-	CHECK(r.newest_ts == 1001);
-	CHECK(mc_replay_digest("a", 1) != mc_replay_digest("b", 1));
-
 	SECTION("evlog");
 	struct mc_evlog l;
 	char out[160];
@@ -324,317 +193,6 @@ static void test_replay_evlog(void)
 	mc_evlog_add(&l, 5, "this event text is far longer than the forty-four characters kept");
 	mc_evlog_page(&l, 1, out, sizeof(out));
 	CHECK(strlen(out) < MC_REPLY_MAX);
-}
-
-/* -------------------------------------------------------------- controller -- */
-
-struct fake {
-	uint32_t now;
-	int start_calls, abort_calls, watch_calls;
-	char start_bundle[64], start_addr[24];
-	char start_type;
-	bool busy;
-	int start_rc;
-	char watching[24];
-	char reports[16][160];
-	int nreports;
-	char notes[64][160];
-	int nnotes;
-	bool have_bundle;
-};
-
-static uint32_t f_now(void *c) { return ((struct fake *)c)->now; }
-static size_t f_scan(void *c, struct mc_scan_row *rows, size_t max, size_t off, size_t *total)
-{
-	(void)c;
-	static const struct mc_scan_row all[5] = {
-		{ "EA:7C:11:0B:55:90", 'r', -52, "RAK4631_OTA" },
-		{ "C0:11:22:33:44:55", 'r', -61, "Xiao" },
-		{ "10:22:33:44:55:66", 'p', -70, "" },
-		{ "AA:BB:CC:DD:EE:01", 'r', -81, "phone" },
-		{ "AA:BB:CC:DD:EE:02", 'r', -90, "tag" },
-	};
-	*total = 5;
-	size_t n = 0;
-	for (size_t i = off; i < 5 && n < max; i++) rows[n++] = all[i];
-	return n;
-}
-static void f_watch(void *c, const char *a, char t)
-{
-	struct fake *f = c; (void)t;
-	f->watch_calls++;
-	snprintf(f->watching, sizeof(f->watching), "%s", a ? a : "");
-}
-static int f_bundle(void *c, const char *b) { (void)b; return ((struct fake *)c)->have_bundle ? 0 : -2; }
-static int f_start(void *c, const char *b, const char *a, char t)
-{
-	struct fake *f = c;
-	f->start_calls++;
-	snprintf(f->start_bundle, sizeof(f->start_bundle), "%s", b);
-	snprintf(f->start_addr, sizeof(f->start_addr), "%s", a);
-	f->start_type = t;
-	return f->start_rc;
-}
-static int f_abort(void *c) { ((struct fake *)c)->abort_calls++; return 0; }
-static bool f_busy(void *c) { return ((struct fake *)c)->busy; }
-static int f_batt(void *c, uint16_t *mv, uint8_t *pct, int *chg) { (void)c; *mv = 3912; *pct = 71; *chg = 0; return 0; }
-static const char *f_ver(void *c) { (void)c; return "0.1.0+test"; }
-static size_t f_logp(void *c, unsigned p, char *o, size_t cap) { (void)c; return (size_t)snprintf(o, cap, "log page %u", p); }
-static void f_report(void *c, const char *m)
-{
-	struct fake *f = c;
-	if (f->nreports < 16) snprintf(f->reports[f->nreports++], 160, "%s", m);
-}
-static void f_note(void *c, const char *m)
-{
-	struct fake *f = c;
-	if (f->nnotes < 64) snprintf(f->notes[f->nnotes++], 160, "%s", m);
-}
-
-static const struct mc_ops FOPS = {
-	f_now, f_scan, f_watch, f_bundle, f_start, f_abort, f_busy, f_batt, f_ver, f_logp,
-	f_report, f_note,
-};
-
-static const struct mc_cfg CFG = {
-	.rssi_min = -75, .hold_ms = 5000, .max_gap_ms = 3000, .min_samples = 3,
-	.arm_timeout_s = 600,
-};
-
-static void ctl_setup(struct mc_ctl *c, struct fake *f)
-{
-	memset(f, 0, sizeof(*f));
-	f->have_bundle = true;
-	mc_ctl_init(c, &FOPS, f, &CFG);
-}
-
-static char R[MC_REPLY_MAX + 1];
-static size_t H(struct mc_ctl *c, bool authed, const char *t)
-{
-	size_t n = mc_ctl_handle(c, authed, t, R, sizeof(R));
-	CHECK(n == strlen(R) && n >= 1 && n <= MC_REPLY_MAX);
-	return n;
-}
-
-static void adv_run(struct mc_ctl *c, struct fake *f, uint32_t ms, uint32_t step, int8_t rssi)
-{
-	for (uint32_t t = 0; t <= ms; t += step) {
-		mc_ctl_on_adv(c, rssi);
-		f->now += step;
-	}
-}
-
-#define ARM "arm EA:7C:11:0B:55:90 fw.zip"
-
-static void test_ctl(void)
-{
-	struct mc_ctl c;
-	struct fake f;
-	SECTION("controller");
-
-	/* boots disarmed; START is refused */
-	ctl_setup(&c, &f);
-	CHECK(c.state == MC_DISARMED);
-	H(&c, true, "start");
-	CHECK(strstr(R, "refused") && f.start_calls == 0);
-
-	/* privileged commands from an unauthorised sender change nothing */
-	H(&c, false, ARM);
-	CHECK(strstr(R, "DENIED") && c.state == MC_DISARMED && f.watch_calls == 0);
-	H(&c, false, "start");
-	CHECK(strstr(R, "DENIED") && f.start_calls == 0);
-	H(&c, false, "abort");
-	CHECK(strstr(R, "DENIED") && f.abort_calls == 0);
-	H(&c, false, "disarm");
-	CHECK(strstr(R, "DENIED"));
-
-	/* read-only commands do not need the key */
-	H(&c, false, "status");   CHECK(strstr(R, "DISARMED"));
-	H(&c, false, "version");  CHECK(strstr(R, "0.1.0+test"));
-	H(&c, false, "battery");  CHECK(strstr(R, "3.91V") && strstr(R, "71%"));
-	H(&c, false, "log 2");    CHECK(!strcmp(R, "log page 2"));
-	H(&c, false, "scan");     CHECK(strstr(R, "scan 1/2") && strstr(R, "EA:7C:11:0B:55:90 r -52 RAK4631_OTA"));
-	H(&c, false, "scan 2");   CHECK(strstr(R, "scan 2/2") && strstr(R, "AA:BB:CC:DD:EE:02"));
-	H(&c, false, "scan 3");   CHECK(strstr(R, "no page 3"));
-	H(&c, false, "rssi");     CHECK(strstr(R, "not armed"));
-	H(&c, false, "bogus");    CHECK(strstr(R, "cmds"));
-
-	/* arm needs an existing bundle */
-	f.have_bundle = false;
-	H(&c, true, ARM);
-	CHECK(strstr(R, "not found") && c.state == MC_DISARMED);
-	f.have_bundle = true;
-
-	/* arm; start immediately -> refused, DFU never invoked */
-	H(&c, true, ARM);
-	CHECK(strstr(R, "ARMED") && c.state == MC_ARMED);
-	CHECK(!strcmp(f.watching, "EA:7C:11:0B:55:90"));
-	H(&c, true, "start");
-	CHECK(strstr(R, "not seen") && f.start_calls == 0);
-
-	/* strong but only 4 s of it -> still refused */
-	f.now = 10000;
-	adv_run(&c, &f, 3999, 500, -60);
-	H(&c, true, "start");
-	CHECK(strstr(R, "refused") && f.start_calls == 0);
-	H(&c, true, "rssi");
-	CHECK(strstr(R, "rssi -60") && strstr(R, "(min -75)"));
-
-	/* a weak dip resets it */
-	mc_ctl_on_adv(&c, -90);
-	adv_run(&c, &f, 3999, 500, -60);
-	H(&c, true, "start");
-	CHECK(f.start_calls == 0);
-
-	/* sustained 5 s above threshold -> START accepted, exact target passed through */
-	ctl_setup(&c, &f);
-	H(&c, true, ARM);
-	f.now = 20000;
-	adv_run(&c, &f, 5000, 500, -60);
-	f.now -= 500;                          /* last sample was at +5000 */
-	H(&c, true, "start");
-	CHECK(f.start_calls == 1);
-	CHECK(!strcmp(f.start_addr, "EA:7C:11:0B:55:90") && !strcmp(f.start_bundle, "fw.zip"));
-	CHECK(f.start_type == 'r');
-	CHECK(strstr(R, "STARTED") && c.state == MC_RUNNING);
-	CHECK(!strcmp(f.watching, ""));       /* arming consumed; watch stopped */
-
-	/* a second START does not start a second run */
-	H(&c, true, "start");
-	CHECK(f.start_calls == 1 && strstr(R, "already running"));
-	H(&c, true, ARM);
-	CHECK(strstr(R, "refused") && c.state == MC_RUNNING);
-	H(&c, true, "disarm");
-	CHECK(strstr(R, "use abort") && c.state == MC_RUNNING);
-
-	/* reports: 0/25/50/75/100 and success, once each */
-	struct dfu_status_event e;
-	f.nreports = 0;
-	e = (struct dfu_status_event){ DFU_STATUS_UPLOADING, 0, 0, 1, 5 }; mc_ctl_on_dfu_event(&c, &e);
-	e.percent = 26; mc_ctl_on_dfu_event(&c, &e);
-	e.percent = 51; mc_ctl_on_dfu_event(&c, &e);
-	e.percent = 76; mc_ctl_on_dfu_event(&c, &e);
-	e.state = DFU_STATUS_VALIDATING; e.percent = 99; mc_ctl_on_dfu_event(&c, &e);
-	e.state = DFU_STATUS_DONE; e.result = DFU_STATUS_RESULT_OK; mc_ctl_on_dfu_event(&c, &e);
-	CHECK(f.nreports == 6);
-	CHECK(!strcmp(f.reports[0], "DFU 0%") && !strcmp(f.reports[1], "DFU 25%") &&
-	      !strcmp(f.reports[2], "DFU 50%") && !strcmp(f.reports[3], "DFU 75%") &&
-	      !strcmp(f.reports[4], "DFU 100%"));
-	CHECK(strstr(f.reports[5], "DFU SUCCESS EA:7C:11:0B:55:90"));
-	CHECK(c.state == MC_DISARMED && c.last == MC_LAST_OK);
-	H(&c, true, "status"); CHECK(!strcmp(R, "DISARMED last=ok"));
-	H(&c, true, "start");  CHECK(strstr(R, "not armed") && f.start_calls == 1);
-
-	/* failure is reported with its reason */
-	ctl_setup(&c, &f);
-	H(&c, true, ARM);
-	f.now = 1000; adv_run(&c, &f, 5000, 500, -60); f.now -= 500;
-	H(&c, true, "start");
-	e = (struct dfu_status_event){ DFU_STATUS_UPLOADING, 30, 0, 1, 5 };
-	mc_ctl_on_dfu_event(&c, &e);
-	e = (struct dfu_status_event){ DFU_STATUS_FAILED, 30, DFU_STATUS_RESULT_TIMEOUT, 1, 5 };
-	f.nreports = 0;
-	mc_ctl_on_dfu_event(&c, &e);
-	CHECK(f.nreports == 1 && strstr(f.reports[0], "DFU FAILED") && strstr(f.reports[0], "timeout"));
-	H(&c, true, "status"); CHECK(strstr(R, "last=failed (timeout)"));
-
-	/* a runner reset from elsewhere ends the run visibly */
-	ctl_setup(&c, &f);
-	H(&c, true, ARM);
-	f.now = 1000; adv_run(&c, &f, 5000, 500, -60); f.now -= 500;
-	H(&c, true, "start");
-	e = (struct dfu_status_event){ DFU_STATUS_IDLE, 0, 0, 0, 0 };
-	mc_ctl_on_dfu_event(&c, &e);
-	CHECK(c.state == MC_DISARMED && strstr(f.reports[f.nreports - 1], "stopped"));
-
-	/* abort while running */
-	ctl_setup(&c, &f);
-	H(&c, true, ARM);
-	f.now = 1000; adv_run(&c, &f, 5000, 500, -60); f.now -= 500;
-	H(&c, true, "start");
-	H(&c, true, "abort");
-	CHECK(f.abort_calls == 1 && c.state == MC_DISARMED && c.last == MC_LAST_ABORTED);
-	e = (struct dfu_status_event){ DFU_STATUS_UPLOADING, 40, 0, 1, 5 };
-	f.nreports = 0;
-	mc_ctl_on_dfu_event(&c, &e);
-	CHECK(f.nreports == 0);                 /* nothing reported after abort */
-
-	/* abort / disarm while only armed */
-	ctl_setup(&c, &f);
-	H(&c, true, ARM);
-	H(&c, true, "disarm");
-	CHECK(c.state == MC_DISARMED && !strcmp(f.watching, ""));
-	H(&c, true, ARM);
-	H(&c, true, "abort");
-	CHECK(c.state == MC_DISARMED && f.abort_calls == 0);
-	H(&c, true, "abort");
-	CHECK(strstr(R, "nothing running"));
-
-	/* lost samples make the gate start over, so START is refused */
-	ctl_setup(&c, &f);
-	H(&c, true, ARM);
-	f.now = 1000; adv_run(&c, &f, 5000, 500, -60); f.now -= 500;
-	mc_ctl_samples_lost(&c);
-	H(&c, true, "start");
-	CHECK(f.start_calls == 0);
-
-	/* START while the runner is busy is refused even with a good gate */
-	ctl_setup(&c, &f);
-	H(&c, true, ARM);
-	f.now = 1000; adv_run(&c, &f, 5000, 500, -60); f.now -= 500;
-	f.busy = true;
-	H(&c, true, "start");
-	CHECK(f.start_calls == 0 && strstr(R, "busy"));
-	f.busy = false;
-	f.start_rc = -16;
-	H(&c, true, "start");
-	CHECK(f.start_calls == 1 && c.state == MC_ARMED && strstr(R, "still ARMED"));
-
-	/* the gate is evaluated at START time: a good window that went stale fails */
-	ctl_setup(&c, &f);
-	H(&c, true, ARM);
-	f.now = 1000; adv_run(&c, &f, 5000, 500, -60);
-	f.now += 4000;                          /* target silent for 4 s */
-	H(&c, true, "start");
-	CHECK(f.start_calls == 0 && strstr(R, "went quiet"));
-
-	/* NO AUTOMATIC START: a perfect gate and a very long wait never begin DFU */
-	ctl_setup(&c, &f);
-	H(&c, true, ARM);
-	f.now = 1000;
-	for (int i = 0; i < 1000; i++) {
-		mc_ctl_on_adv(&c, -40);
-		mc_ctl_tick(&c);
-		f.now += 500;
-		if (i == 500) { c.cfg.arm_timeout_s = 0; }   /* never lapses either */
-	}
-	CHECK(f.start_calls == 0 && c.state == MC_ARMED);
-
-	/* arming lapses */
-	ctl_setup(&c, &f);
-	H(&c, true, ARM);
-	f.now = 599000; mc_ctl_tick(&c); CHECK(c.state == MC_ARMED);
-	f.now = 600000; mc_ctl_tick(&c);
-	CHECK(c.state == MC_DISARMED && strstr(f.reports[f.nreports - 1], "expired"));
-
-	/* re-arming a different target replaces the first and restarts the gate */
-	ctl_setup(&c, &f);
-	H(&c, true, ARM);
-	f.now = 1000; adv_run(&c, &f, 5000, 500, -60);
-	H(&c, true, "arm C0:11:22:33:44:55 other.zip");
-	CHECK(!strcmp(c.addr, "C0:11:22:33:44:55") && !c.gate.seen_any);
-	H(&c, true, "start");
-	CHECK(f.start_calls == 0);
-
-	/* every reply fits one MeshCore message, even with the longest arguments */
-	ctl_setup(&c, &f);
-	char longarm[160];
-	snprintf(longarm, sizeof(longarm), "arm EA:7C:11:0B:55:90 %s public",
-		 "abcdefghijklmnopqrstuvwxyz0123456789.zip");
-	H(&c, true, longarm);
-	H(&c, true, "start");
-	H(&c, true, "status");
-	f.now = 1000; adv_run(&c, &f, 5000, 500, -127 + 60);
 }
 
 /* ------------------------------------------------------- wire vs MeshCore -- */
@@ -759,7 +317,7 @@ struct rig {
 	struct sink s;
 };
 
-static void rig_setup(struct rig *r, uint32_t persisted_ts)
+static void rig_setup(struct rig *r, uint32_t persisted_adv_ts)
 {
 	uint8_t seed[32];
 	memset(r, 0, sizeof(*r));
@@ -767,7 +325,7 @@ static void rig_setup(struct rig *r, uint32_t persisted_ts)
 	seed_for(0x55, seed); mc_id_from_seed(&r->op, seed);
 	mc_id_set_operator(&r->node, r->op.pub);
 	ctl_setup(&r->ctl, &r->f);
-	struct mc_persist p = { persisted_ts, 0 };
+	struct mc_persist p = { 0, persisted_adv_ts };
 	mc_node_init(&r->nd, CRY, &r->node, &r->ctl, &NOPS, &r->s, &p);
 }
 
@@ -789,24 +347,47 @@ static bool decode_reply(const struct rig *r, const uint8_t *fr, size_t len, str
 	return n > 0 && mc_wire_parse_txt(plain, (size_t)n, t) == 0;
 }
 
+/* Send a command as the operator and return the node's reply text. */
+static bool op_say(struct rig *r, uint32_t ts, uint8_t type, const char *text, char *reply)
+{
+	uint8_t fr[MC_MAX_RAW];
+	struct mc_txt t;
+	int before = r->s.n;
+	size_t n = op_frame(r, ts, type, text, fr);
+
+	reply[0] = '\0';
+	mc_node_rx(&r->nd, fr, n);
+	for (int i = r->s.n - 1; i >= before; i--) {
+		if (decode_reply(r, r->s.frames[i], r->s.lens[i], &t)) {
+			snprintf(reply, 160, "%s", t.text);
+			return true;
+		}
+	}
+	return false;
+}
+
 static void test_node(void)
 {
 	struct rig r;
 	uint8_t fr[MC_MAX_RAW];
 	struct mc_txt t;
+	char rep[160], cmd[160];
 	size_t n;
 	SECTION("node (packet -> decision)");
 
-	/* operator "arm": ACK + reply, state changes, timestamp persisted */
+	/* status gives a token; arm with it: ACK + reply, nothing written to flash */
 	rig_setup(&r, 1000);
-	n = op_frame(&r, 2000, MC_TXT_PLAIN, ARM, fr);
+	CHECK(op_say(&r, 2000, MC_TXT_PLAIN, "status", rep) && strstr(rep, "IDLE") && strstr(rep, "tok="));
+	snprintf(cmd, sizeof(cmd), ARM_NOTOK " %s", tok_of(rep));
+	r.s.n = 0;
+	n = op_frame(&r, 2001, MC_TXT_PLAIN, cmd, fr);
 	mc_node_rx(&r.nd, fr, n);
-	CHECK(r.ctl.state == MC_ARMED);
+	CHECK(r.ctl.state == MC_WAITING);
 	CHECK(r.s.n == 2);                                   /* ACK, then reply */
 	struct mc_pkt p0;
 	CHECK(mc_wire_parse(r.s.frames[0], r.s.lens[0], &p0) == 0 && p0.ptype == MC_PT_PATH);
-	CHECK(decode_reply(&r, r.s.frames[1], r.s.lens[1], &t) && strstr(t.text, "ARMED"));
-	CHECK(r.s.persists == 1 && r.s.last.replay_ts == 2000);
+	CHECK(decode_reply(&r, r.s.frames[1], r.s.lens[1], &t) && strstr(t.text, "ARM ok FW "));
+	CHECK(r.s.persists == 0);                            /* commands never touch flash */
 
 	/* the same packet again (a repeater's copy, or a retry): acked, not re-run */
 	r.s.n = 0;
@@ -814,11 +395,30 @@ static void test_node(void)
 	CHECK(r.s.n == 1);                                   /* ACK only, no reply */
 	CHECK(r.f.watch_calls == 1);
 
-	/* a recorded older command is dropped without a trace on the air */
+	/* a wrong operator clock does not lock anyone out: ancient and far-future
+	 * timestamps are both processed */
+	CHECK(op_say(&r, 5, MC_TXT_PLAIN, "disarm", rep) && r.ctl.state == MC_IDLE);
+	CHECK(op_say(&r, 0xFFFFFFF0u, MC_TXT_PLAIN, "status", rep) && strstr(rep, "IDLE"));
+	CHECK(op_say(&r, 10, MC_TXT_PLAIN, "status", rep) && strstr(rep, "IDLE"));
+
+	/* a recorded ARM replayed later (after the duplicate ring has moved on) is
+	 * inert: its token was spent */
+	for (uint32_t i = 0; i < 12; i++) {
+		char v[16];
+		snprintf(v, sizeof(v), "version");
+		op_say(&r, 100 + i, MC_TXT_PLAIN, v, rep);
+	}
+	r.f.watch_calls = 0;
 	r.s.n = 0;
-	n = op_frame(&r, 1500, MC_TXT_PLAIN, "disarm", fr);
 	mc_node_rx(&r.nd, fr, n);
-	CHECK(r.s.n == 0 && r.ctl.state == MC_ARMED);
+	CHECK(r.ctl.state == MC_IDLE && r.f.watch_calls == 0);
+	CHECK(r.s.n >= 1);   /* it is processed (no timestamp rule) and answered with a fresh demand */
+
+	/* re-arm properly for the key / sender checks below */
+	CHECK(op_say(&r, 300, MC_TXT_PLAIN, "status", rep));
+	snprintf(cmd, sizeof(cmd), ARM_NOTOK " %s", tok_of(rep));
+	CHECK(op_say(&r, 301, MC_TXT_PLAIN, cmd, rep) && strstr(rep, "ARM ok"));
+	CHECK(r.ctl.state == MC_WAITING);
 
 	/* a frame sealed with the wrong key never reaches the controller */
 	struct mc_id intruder;
@@ -833,7 +433,7 @@ static void test_node(void)
 	n = mc_wire_build_txt(CRY, isec, r.node.pub[0], r.op.pub[0], 3000,
 			      MC_TXT_PLAIN, "disarm", fr, sizeof(fr));
 	mc_node_rx(&r.nd, fr, n);
-	CHECK(r.s.n == 0 && r.ctl.state == MC_ARMED && r.nd.rx_bad >= 1);
+	CHECK(r.s.n == 0 && r.ctl.state == MC_WAITING && r.nd.rx_bad >= 1);
 
 	/* ...even knowing the operator's public key: that yields the wrong secret */
 	uint8_t wrong[32];
@@ -850,7 +450,7 @@ static void test_node(void)
 	n = mc_wire_build_txt(CRY, r.node.secret, r.node.pub[0], (uint8_t)(r.op.pub[0] ^ 1),
 			      3003, MC_TXT_PLAIN, "disarm", fr, sizeof(fr));
 	mc_node_rx(&r.nd, fr, n);
-	CHECK(r.s.n == 0 && r.ctl.state == MC_ARMED);
+	CHECK(r.s.n == 0 && r.ctl.state == MC_WAITING);
 
 	/* garbage and truncations never crash */
 	for (size_t l = 0; l < 40; l++) {
@@ -858,48 +458,54 @@ static void test_node(void)
 		for (size_t i = 0; i < sizeof(junk); i++) junk[i] = (uint8_t)(i * 31 + l);
 		mc_node_rx(&r.nd, junk, l);
 	}
-	CHECK(r.ctl.state == MC_ARMED);
+	CHECK(r.ctl.state == MC_WAITING);
 
 	/* a CLI-type command is answered in kind, and (per MeshCore) not ACKed */
 	rig_setup(&r, 0);
+	r.s.n = 0;
 	n = op_frame(&r, 10, MC_TXT_CLI, "version", fr);
 	mc_node_rx(&r.nd, fr, n);
 	CHECK(r.s.n == 1);
 	CHECK(decode_reply(&r, r.s.frames[0], r.s.lens[0], &t) && t.txt_type == MC_TXT_CLI &&
 	      strstr(t.text, "0.1.0+test"));
 
-	/* end to end: arm, hold the gate for 5 s, START, milestones go out */
+	/* end to end over the air: status, arm, hold the gate, START needs a token */
 	rig_setup(&r, 0);
-	n = op_frame(&r, 100, MC_TXT_PLAIN, ARM, fr);
-	mc_node_rx(&r.nd, fr, n);
-	r.s.n = 0;
+	op_say(&r, 100, MC_TXT_PLAIN, "status", rep);
+	snprintf(cmd, sizeof(cmd), ARM_NOTOK " %s", tok_of(rep));
+	op_say(&r, 101, MC_TXT_PLAIN, cmd, rep);
 	r.f.now = 1000;
 	adv_run(&r.ctl, &r.f, 3000, 500, -60);
-	n = op_frame(&r, 101, MC_TXT_PLAIN, "start", fr);
-	mc_node_rx(&r.nd, fr, n);
-	CHECK(r.f.start_calls == 0);                         /* only ~3 s held */
-	CHECK(decode_reply(&r, r.s.frames[r.s.n - 1], r.s.lens[r.s.n - 1], &t) && strstr(t.text, "refused"));
-	adv_run(&r.ctl, &r.f, 2500, 500, -60);
-	r.f.now -= 500;
-	n = op_frame(&r, 102, MC_TXT_PLAIN, "start", fr);
-	mc_node_rx(&r.nd, fr, n);
-	CHECK(r.f.start_calls == 1 && r.ctl.state == MC_RUNNING);
+	op_say(&r, 102, MC_TXT_PLAIN, "start", rep);
+	snprintf(cmd, sizeof(cmd), "start %s", tok_of(rep));
+	CHECK(op_say(&r, 103, MC_TXT_PLAIN, cmd, rep) && strstr(rep, "refused") && r.f.start_calls == 0);
+	adv_run(&r.ctl, &r.f, 3000, 500, -60);
+	CHECK(op_say(&r, 104, MC_TXT_PLAIN, "start", rep) && strstr(rep, "needs token"));
+	CHECK(r.f.start_calls == 0);
+	snprintf(cmd, sizeof(cmd), "start %s", tok_of(rep));
+	CHECK(op_say(&r, 105, MC_TXT_PLAIN, cmd, rep) && strstr(rep, "STARTED FW "));
+	CHECK(r.f.start_calls == 1 && r.ctl.state == MC_DFU_ACTIVE);
 
-	/* adverts: signed, newer than any before, persisted */
-	rig_setup(&r, 5000);
+	/* adverts: signed, newer than any before; flash written at most daily */
+	rig_setup(&r, 0);
 	r.s.n = 0;
 	mc_node_advertise(&r.nd, "Drone Updater");
-	CHECK(r.s.n == 1 && r.s.frames[0][0] == 0x11 && r.s.last.adv_ts >= 5000);
-	uint32_t first = r.s.last.adv_ts;
+	CHECK(r.s.n == 1 && r.s.frames[0][0] == 0x11);
+	CHECK(r.s.persists == 1);                       /* first ever: stored */
+	uint32_t first = r.nd.last_adv_ts;
 	mc_node_advertise(&r.nd, "Drone Updater");
-	CHECK(r.s.last.adv_ts > first);
+	CHECK(r.nd.last_adv_ts > first);
+	CHECK(r.s.persists == 1);                       /* not again within a day */
+	r.s.now += 86400u * 1000u + 5000u;
+	mc_node_advertise(&r.nd, "Drone Updater");
+	CHECK(r.s.persists == 2 && r.s.last.adv_ts >= first + 86400u);
 	/* after a reboot the persisted floor keeps it increasing */
 	struct mc_persist keep = r.s.last;
 	struct rig r2;
 	rig_setup(&r2, 0);
 	mc_node_init(&r2.nd, CRY, &r2.node, &r2.ctl, &NOPS, &r2.s, &keep);
 	mc_node_advertise(&r2.nd, "Drone Updater");
-	CHECK(r2.s.last.adv_ts > keep.adv_ts);
+	CHECK(r2.nd.last_adv_ts > keep.adv_ts);
 }
 
 /* ---- builtin crypto vs OpenSSL ---------------------------------------- */
@@ -1052,27 +658,27 @@ static void test_store(void)
 	CHECK(mc_store_load(&st, &fl, &p) == MC_STORE_EMPTY);
 	CHECK(mc_store_provision(&st, prv, pub) == MC_STORE_OK);
 	CHECK(mc_store_load(&st, &fl, &p) == MC_STORE_OK);
-	CHECK(!memcmp(st.prv, prv, 64) && !memcmp(st.pub, pub, 32) && p.replay_ts == 0 && p.adv_ts == 0);
+	CHECK(!memcmp(st.prv, prv, 64) && !memcmp(st.pub, pub, 32) && p.reserved == 0 && p.adv_ts == 0);
 
 	struct mc_persist w = { 100, 50 };
 	CHECK(mc_store_append(&st, &w) == MC_STORE_OK);
-	w.replay_ts = 200; w.adv_ts = 60;
+	w.reserved = 200; w.adv_ts = 60;
 	CHECK(mc_store_append(&st, &w) == MC_STORE_OK);
-	CHECK(mc_store_load(&st, &fl, &p) == MC_STORE_OK && p.replay_ts == 200 && p.adv_ts == 60);
+	CHECK(mc_store_load(&st, &fl, &p) == MC_STORE_OK && p.reserved == 200 && p.adv_ts == 60);
 
 	/* A corrupted header is "empty", never a half-trusted key. */
 	f.page[8] ^= 1;
 	CHECK(mc_store_load(&st, &fl, &p) == MC_STORE_EMPTY);
 	f.page[8] ^= 1;
-	CHECK(mc_store_load(&st, &fl, &p) == MC_STORE_OK && p.replay_ts == 200);
+	CHECK(mc_store_load(&st, &fl, &p) == MC_STORE_OK && p.reserved == 200);
 
 	/* Fill past the page: identity survives, newest record wins, no 0->1 writes. */
 	for (uint32_t i = 0; i < 3 * MC_STORE_MAX_RECS + 7; i++) {
-		w.replay_ts = 1000 + i; w.adv_ts = 5000 + i;
+		w.reserved = 1000 + i; w.adv_ts = 5000 + i;
 		CHECK(mc_store_append(&st, &w) == MC_STORE_OK);
 	}
 	CHECK(mc_store_load(&st, &fl, &p) == MC_STORE_OK);
-	CHECK(p.replay_ts == 1000 + 3 * MC_STORE_MAX_RECS + 6 && !memcmp(st.prv, prv, 64));
+	CHECK(p.reserved == 1000 + 3 * MC_STORE_MAX_RECS + 6 && !memcmp(st.prv, prv, 64));
 	CHECK(f.violations == 0);
 
 	/* Power cut at every operation of a run of appends that includes a rollover.
@@ -1087,10 +693,10 @@ static void test_store(void)
 			mc_store_load(&gs, &gf, &gp);
 			mc_store_provision(&gs, prv, pub);
 			/* run up to just before a rollover */
-			uint32_t acked_replay = 0;
+			uint32_t acked = 0;
 			for (uint32_t i = 0; i < MC_STORE_MAX_RECS - 3; i++) {
 				struct mc_persist q = { 10 + i, 10 + i };
-				mc_store_append(&gs, &q); acked_replay = q.replay_ts;
+				mc_store_append(&gs, &q); acked = q.reserved;
 			}
 			g.ops = 0; g.cut_at = cut; g.cut_partial = partial;
 			int in_roll = 0;
@@ -1098,13 +704,13 @@ static void test_store(void)
 				struct mc_persist q = { 1000 + i, 1000 + i };
 				if (gs.next_slot >= MC_STORE_MAX_RECS) in_roll = 1;
 				int rc = mc_store_append(&gs, &q);
-				if (rc == MC_STORE_OK) acked_replay = q.replay_ts;
+				if (rc == MC_STORE_OK) acked = q.reserved;
 			}
 			struct mc_store ls; struct mc_persist lp;
 			int rc = mc_store_load(&ls, &gf, &lp);
 			if (rc == MC_STORE_OK) {
 				CHECK(!memcmp(ls.prv, prv, 64));
-				CHECK(lp.replay_ts >= acked_replay || (in_roll && lp.replay_ts == 0));
+				CHECK(lp.reserved >= acked || (in_roll && lp.reserved == 0));
 			} else {
 				CHECK(rc == MC_STORE_EMPTY && g.dead);
 				CHECK(in_roll);              /* only the documented window may lose the key */
@@ -1119,11 +725,9 @@ static void test_store(void)
 int main(void)
 {
 	load_vectors("vectors/meshcore_vectors.txt");
-	test_gate();
 	test_cmd();
-	test_progress();
-	test_replay_evlog();
-	test_ctl();
+	test_evlog();
+	run_ctl_tests();
 	test_store();
 	test_sx126x();
 	test_crypto_builtin();

@@ -43,3 +43,19 @@
 		};
 	};
 };
+
+/* Flash saving: use the plain RNG peripheral for entropy instead of CryptoCell
+ * (whose platform library is ~9 KB). See boards/meshcore/*.conf. */
+/ {
+	chosen {
+		zephyr,entropy = &rng;
+	};
+};
+
+&rng {
+	status = "okay";
+};
+
+&cryptocell {
+	status = "disabled";
+};

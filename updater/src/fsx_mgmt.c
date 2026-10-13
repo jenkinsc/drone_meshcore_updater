@@ -27,6 +27,9 @@
 #include <zcbor_decode.h>
 #include <zcbor_encode.h>
 #include <mgmt/mcumgr/util/zcbor_bulk.h>
+#ifdef CONFIG_MC_CMD_ENFORCE
+#include "mc/mc_zephyr.h"
+#endif
 
 #include <errno.h>
 #include <string.h>
@@ -285,6 +288,13 @@ static int fsx_rmdir(struct smp_streamer *ctxt)
 		return MGMT_ERR_EINVAL;
 	}
 
+#ifdef CONFIG_MC_CMD_ENFORCE
+	/* The bundle a MeshCore ARM bound a digest to is not removable from here. */
+	if (mc_fs_mutation_blocked(path)) {
+		smp_add_cmd_err(zse, FSX_MGMT_GROUP_ID, (uint16_t)EBUSY);
+		return MGMT_ERR_EOK;
+	}
+#endif
 	int rc = recursive ? rmdir_recursive(path) : fs_unlink(path);
 	if (rc < 0) {
 		smp_add_cmd_err(zse, FSX_MGMT_GROUP_ID, (uint16_t)-rc);
@@ -317,6 +327,12 @@ static int fsx_move(struct smp_streamer *ctxt)
 		return MGMT_ERR_EINVAL;
 	}
 
+#ifdef CONFIG_MC_CMD_ENFORCE
+	if (mc_fs_mutation_blocked(src) || mc_fs_mutation_blocked(dst)) {
+		smp_add_cmd_err(zse, FSX_MGMT_GROUP_ID, (uint16_t)EBUSY);
+		return MGMT_ERR_EOK;
+	}
+#endif
 	int rc = fs_rename(src, dst);
 	if (rc < 0) {
 		smp_add_cmd_err(zse, FSX_MGMT_GROUP_ID, (uint16_t)-rc);

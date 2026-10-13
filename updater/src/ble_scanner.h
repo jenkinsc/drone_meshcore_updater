@@ -194,7 +194,14 @@ int ble_scanner_with_radio_paused(int (*fn)(void));
  *
  * Runs on the BT RX thread, so it must not block and must not call back into
  * this file. It is only called while a survey is running. NULL removes it. */
-typedef void (*ble_scanner_adv_fn)(const bt_addr_le_t *addr, int8_t rssi);
+typedef void (*ble_scanner_adv_fn)(const bt_addr_le_t *addr, int8_t rssi,
+				   bool dfu_uuid, const char *name);
+
+/* Extra identity test for a pinned scan, applied after the address rule.
+ * Return false to refuse the sighting. NULL (default) = no extra test. */
+typedef bool (*ble_scanner_pin_filter_fn)(const bt_addr_le_t *addr,
+					  const char *name, bool dfu_uuid);
+void ble_scanner_set_pin_filter(ble_scanner_pin_filter_fn fn);
 
 void ble_scanner_set_adv_observer(ble_scanner_adv_fn fn);
 

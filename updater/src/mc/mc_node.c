@@ -3,13 +3,6 @@
 #include <stdio.h>
 #include <string.h>
 
-static void note(struct mc_node *n, const char *msg)
-{
-	if (n->ops->note) {
-		n->ops->note(n->ctx, msg);
-	}
-}
-
 static uint32_t clock_now(const struct mc_node *n)
 {
 	uint32_t el = n->ops->now_ms(n->ctx) - n->clock_at_ms;
@@ -38,21 +31,15 @@ void mc_node_init(struct mc_node *n, const struct mc_crypto *cr, struct mc_id *i
 	n->ops = ops;
 	n->ctx = ctx;
 	n->saved = *persisted;
-	mc_replay_init(&n->replay, persisted->replay_ts);
+	mc_replay_init(&n->replay);
 	n->clock_at_ms = ops->now_ms(ctx);
-	n->clock_ts = persisted->replay_ts > persisted->adv_ts ? persisted->replay_ts
-							       : persisted->adv_ts;
-}
-
-static void persist_if_changed(struct mc_node *n)
-{
-	if (n->ops->persist == NULL) {
-		return;
-	}
-	if (n->replay.newest_ts != n->saved.replay_ts) {
-		n->saved.replay_ts = n->replay.newest_ts;
-		n->ops->persist(n->ctx, &n->saved);
-	}
+	/* Adverts must be newer than any sent before a reboot. The persisted value
+	 * is a high-water mark written at most once per MC_ADV_PERSIST_S of uptime,
+	 * so after a reboot this can be up to that long *behind* what was sent:
+	 * contacts then ignore adverts until the clock passes it. Harmless (the
+	 * operator is already a contact) and it keeps flash writes rare. */
+	n->clock_ts = persisted->adv_ts;
+	n->last_adv_ts = persisted->adv_ts;   /* the stored value was already sent */
 }
 
 static void send_txt(struct mc_node *n, uint8_t txt_type, const char *text)
@@ -79,10 +66,9 @@ void mc_node_advertise(struct mc_node *n, const char *name)
 	uint8_t frame[MC_MAX_RAW];
 	uint32_t ts = clock_now(n);
 
-	/* Strictly newer than any advert we have sent, including before a reboot:
-	 * receivers treat an advert that is not newer as a replay. */
-	if (ts <= n->saved.adv_ts) {
-		ts = n->saved.adv_ts + 1;
+	/* Strictly newer than the previous advert in this boot. */
+	if (ts <= n->last_adv_ts) {
+		ts = n->last_adv_ts + 1;
 		clock_set_floor(n, ts);
 	}
 	size_t len = mc_wire_build_advert(n->id->pub, n->id->prv, ts, name, frame,
@@ -91,8 +77,12 @@ void mc_node_advertise(struct mc_node *n, const char *name)
 		return;
 	}
 	n->ops->tx(n->ctx, frame, len);
-	n->saved.adv_ts = ts;
-	if (n->ops->persist) {
+	n->last_adv_ts = ts;
+	/* Persist rarely: the first advert ever, then once a day of uptime. */
+	if (n->ops->persist &&
+	    (n->saved.adv_ts == 0 ||
+	     (int32_t)(ts - n->saved.adv_ts) >= (int32_t)MC_ADV_PERSIST_S)) {
+		n->saved.adv_ts = ts;
 		n->ops->persist(n->ctx, &n->saved);
 	}
 }
@@ -145,13 +135,12 @@ void mc_node_rx(struct mc_node *n, const uint8_t *raw, size_t len)
 	dl += txt.text_len;
 	uint32_t digest = mc_replay_digest(dg, (unsigned)dl);
 
-	enum mc_replay_verdict rv = mc_replay_accept(&n->replay, txt.ts, digest);
+	enum mc_replay_verdict rv = mc_replay_accept(&n->replay, digest);
 
 	/* Acknowledge anything that authenticated, including a repeat: a sender
 	 * whose first ACK was lost keeps retrying until it hears one. A repeat is
 	 * acknowledged but not acted on. */
-	if (rv != MC_REPLAY_STALE && txt.txt_type == MC_TXT_PLAIN &&
-	    mc_wire_is_flood(&pkt)) {
+	if (txt.txt_type == MC_TXT_PLAIN && mc_wire_is_flood(&pkt)) {
 		uint8_t ack[6];
 		uint8_t frame[MC_MAX_RAW];
 
@@ -165,11 +154,6 @@ void mc_node_rx(struct mc_node *n, const uint8_t *raw, size_t len)
 		}
 	}
 
-	if (rv == MC_REPLAY_STALE) {
-		n->rx_replay++;
-		note(n, "dropped stale command");
-		return;
-	}
 	if (rv == MC_REPLAY_DUPLICATE) {
 		n->rx_replay++;
 		return;
@@ -180,5 +164,4 @@ void mc_node_rx(struct mc_node *n, const uint8_t *raw, size_t len)
 	char reply[MC_REPLY_MAX + 1];
 	mc_ctl_handle(n->ctl, true, txt.text, reply, sizeof(reply));
 	send_txt(n, txt.txt_type, reply);
-	persist_if_changed(n);
 }

@@ -29,10 +29,11 @@ config MC_CMD_ENFORCE
 	default y
 	help
 	  With this on, dfu_runner_start() refuses (-EPERM) unless the MeshCore
-	  controller has just granted a one-shot permit. That closes the other
-	  ways a run can begin: auto_flash at boot and the SMP TRIGGER_DFU
-	  command. Turn it off only on a bench, and note that "do not begin DFU
-	  automatically" is then no longer guaranteed.
+	  controller is in START_AUTHORIZED and the caller is the thread it
+	  authorised, with the exact bundle path and pin it authorised. That
+	  closes the other ways a run can begin: auto_flash at boot and the SMP
+	  TRIGGER_DFU command. Turn it off only on a bench, and note that "do
+	  not begin DFU automatically" is then no longer guaranteed.
 
 config MC_OPERATOR_PUBKEY
 	string "Operator's MeshCore public key (64 hex characters)"
@@ -55,43 +56,107 @@ config MC_ADVERT_INTERVAL_S
 	  Each advert writes a record to flash, and adverts use channel time.
 	  The operator only needs one to add the node as a contact.
 
+config MC_LAB
+	bool "MeshCore lab logging"
+	depends on MC_CMD
+	help
+	  Log MeshCore RX/TX frames, every BLE scan row handed to the controller,
+	  the RSSI qualification line every 2 s while arming, DFU status changes
+	  and the reset cause. Costs flash (log strings) and a little airtime of
+	  the console; the production build leaves it off. State transitions and
+	  command results are always logged (they are the audit trail).
+
 config MC_THREAD_STACK
 	int "mc thread stack (bytes)"
 	default 6144
 
 comment "Update gate"
 
-config MC_RSSI_MIN
-	int "Minimum RSSI of the armed target (dBm)"
+config MC_AVG_RSSI_MIN
+	int "Minimum rolling-average RSSI of the armed target (dBm)"
+	default -65
+	range -120 -30
+	help
+	  START is refused unless the mean of the last 16 advertisements is at or
+	  above this. Lab default; set it for the real link budget. All gate
+	  values are build-time on purpose: anything read from the filesystem
+	  could be rewritten by any BLE client over SMP, which would let the gate
+	  be weakened from outside.
+
+config MC_RSSI_FLOOR
+	int "Hard RSSI floor (dBm)"
 	default -75
 	range -120 -30
 	help
-	  START is refused unless the target's advertisements stay at or above
-	  this for the whole hold time. It is a build-time value on purpose:
-	  anything read from the filesystem could be rewritten by any BLE client
-	  over SMP, which would let the gate be weakened from outside.
+	  Any single advertisement below this restarts the acquisition. Must not
+	  be above the average threshold.
+
+config MC_GATE_HYST_DB
+	int "Hysteresis once qualified (dB)"
+	default 3
+	range 0 20
+	help
+	  After the gate is ready, the rolling average may dip this far below the
+	  average threshold before readiness is lost, so one slightly weak packet
+	  does not flap the state.
 
 config MC_GATE_HOLD_MS
-	int "How long RSSI must hold (ms)"
+	int "Acquisition duration (ms)"
 	default 5000
 	range 5000 120000
 	help
 	  The lower bound is the five seconds the requirement asks for.
 
 config MC_GATE_MAX_GAP_MS
-	int "Longest silence from the target inside the hold window (ms)"
+	int "Longest silence from the target during acquisition (ms)"
 	default 3000
 	range 500 10000
 
 config MC_GATE_MIN_SAMPLES
-	int "Fewest adverts inside the hold window"
-	default 3
+	int "Fewest adverts during the acquisition"
+	default 8
 	range 2 100
 
 config MC_ARM_TIMEOUT_S
 	int "Seconds an ARM stays valid (0 = never)"
-	default 300
+	default 60
 	range 0 86400
+
+config MC_TOKEN_TTL_S
+	int "Seconds a single-use command token stays valid"
+	default 120
+	range 10 3600
+
+config MC_REPORT_GAP_MS
+	int "Minimum gap between unsolicited reports (ms)"
+	default 4000
+	range 1000 600000
+	help
+	  Progress reports are queued and sent no closer together than this, so a
+	  DFU run never has LoRa traffic more often than every few seconds. A
+	  newer milestone replaces a queued older one.
+
+comment "Target identity"
+
+config MC_TARGET_ALLOW_PLUS1
+	bool "Accept the Nordic DFU-mode address (armed address + 1)"
+	default y
+	help
+	  After a buttonless jump the bootloader advertises one address above the
+	  application. Only accepted for a device that was seen in application
+	  mode, and only with the DFU service UUID. See src/mc/mc_target.h.
+
+config MC_TARGET_REQUIRE_DFU_UUID
+	bool "Require the Nordic Legacy DFU service UUID at armed address + 1"
+	default y
+
+config MC_TARGET_DFU_NAME
+	string "Expected DFU-mode advertised name (empty = do not check)"
+	default "4631_DFU"
+	help
+	  A second check at armed address + 1, never the identity: a packet that
+	  carries a different name is refused; a packet with no name (advertising
+	  data and scan response are separate packets) is judged on the UUID.
 
 comment "LoRa (defaults: MeshCore US preset)"
 

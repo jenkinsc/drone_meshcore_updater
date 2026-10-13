@@ -19,6 +19,13 @@ if(DEFINED ENV{MC_WIO_SX1262} OR MC_WIO_SX1262)
   set(MC_BOARD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/boards/meshcore)
   list(APPEND EXTRA_DTC_OVERLAY_FILE ${MC_BOARD_DIR}/xiao_ble_wio_sx1262.overlay)
   list(APPEND EXTRA_CONF_FILE ${MC_BOARD_DIR}/xiao_ble_wio_sx1262.conf)
+  # Profile: lab (default) keeps verbose logging for the first hardware session;
+  # prod compiles INFO logs out. Chosen by MC_PROFILE in the environment.
+  if("$ENV{MC_PROFILE}" STREQUAL "prod")
+    list(APPEND EXTRA_CONF_FILE ${MC_BOARD_DIR}/xiao_ble_wio_sx1262_prod.conf)
+  else()
+    list(APPEND EXTRA_CONF_FILE ${MC_BOARD_DIR}/xiao_ble_wio_sx1262_lab.conf)
+  endif()
   # The operator's key. Git-ignored, so a key is never committed by accident.
   if(EXISTS ${MC_BOARD_DIR}/operator.conf)
     list(APPEND EXTRA_CONF_FILE ${MC_BOARD_DIR}/operator.conf)
@@ -93,7 +100,9 @@ if(CONFIG_MC_CMD)
     src/mc/mc_zephyr.c
     src/mc/mc_radio.c
     src/mc/mc_sx126x.c
-    src/mc/mc_permit.c
+    src/mc/mc_authz.c
+    src/mc/mc_pathguard.c
+    src/mc/mc_target.c
     src/mc/mc_crypto.c
     src/mc/mc_store.c
     src/mc/mc_gate.c
@@ -116,4 +125,7 @@ if(CONFIG_MC_CMD)
   )
   # MC_ED25519_SMALL drops the 30 KB base-point table (see ge.c / ge_small.c).
   target_compile_definitions(app PRIVATE ED25519_NO_SEED MC_ED25519_SMALL)
+  # Floor for advert timestamps (there is no RTC): the build time, UTC seconds.
+  string(TIMESTAMP MC_BUILD_EPOCH "%s" UTC)
+  target_compile_definitions(app PRIVATE MC_BUILD_EPOCH=${MC_BUILD_EPOCH}u)
 endif()

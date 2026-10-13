@@ -27,6 +27,17 @@
 extern "C" {
 #endif
 
+/* Incremental SHA-256, for hashing a file without holding it in RAM. */
+struct mc_sha256_ctx {
+	uint32_t h[8];
+	uint8_t  buf[64];
+	uint32_t blen;
+	uint64_t total;
+};
+void mc_sha256_init(struct mc_sha256_ctx *s);
+void mc_sha256_update(struct mc_sha256_ctx *s, const uint8_t *d, size_t n);
+void mc_sha256_final(struct mc_sha256_ctx *s, uint8_t out[32]);
+
 void mc_sha256(const uint8_t *a, size_t alen, const uint8_t *b, size_t blen,
 	       uint8_t out[32]);
 void mc_hmac_sha256(const uint8_t key[32], const uint8_t *msg, size_t len,

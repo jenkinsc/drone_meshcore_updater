@@ -9,9 +9,9 @@
  *   status
  *   scan [page]                       BLE advertisers heard, strongest first
  *   rssi                              live gate state for the armed target
- *   arm <addr> <bundle> [random|public]
+ *   arm <addr> <bundle> [random|public] [token]
  *   disarm
- *   start
+ *   start [token]
  *   abort
  *   version
  *   battery
@@ -48,6 +48,7 @@ extern "C" {
 
 #define MC_ADDR_STR_LEN  17          /* "AA:BB:CC:DD:EE:FF" */
 #define MC_BUNDLE_MAX    40          /* characters, excluding NUL */
+#define MC_TOKEN_LEN     6           /* hex digits */
 
 enum mc_cmd_id {
 	MC_CMD_STATUS = 0,
@@ -69,6 +70,7 @@ struct mc_cmd {
 	char     addr[MC_ADDR_STR_LEN + 1];     /* arm: normalised upper-case */
 	char     addr_type;                     /* arm: 'r' random, 'p' public */
 	char     bundle[MC_BUNDLE_MAX + 1];     /* arm */
+	char     token[MC_TOKEN_LEN + 1];       /* arm / start; "" if absent */
 };
 
 enum mc_parse_err {
@@ -83,6 +85,9 @@ enum mc_parse_err {
 enum mc_parse_err mc_cmd_parse(const char *text, struct mc_cmd *out);
 
 bool mc_cmd_privileged(enum mc_cmd_id id);
+/* True for the commands that must carry a fresh single-use token (arm, start). */
+bool mc_cmd_needs_token(enum mc_cmd_id id);
+bool mc_token_ok(const char *s);
 const char *mc_cmd_name(enum mc_cmd_id id);
 
 /* Normalise "aa:bb:..." to upper case. Returns false unless `s` is exactly six

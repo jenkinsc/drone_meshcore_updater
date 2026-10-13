@@ -26,6 +26,9 @@
 #include <stdbool.h>
 #include "app.h"
 #include "firmware_inspect.h"
+#ifdef CONFIG_MC_CMD_ENFORCE
+#include "mc/mc_zephyr.h"
+#endif
 
 LOG_MODULE_REGISTER(upload_hook, LOG_LEVEL_INF);
 
@@ -129,6 +132,14 @@ static enum mgmt_cb_return fs_access_cb(uint32_t event,
 		return MGMT_CB_OK;
 	}
 
+#ifdef CONFIG_MC_CMD_ENFORCE
+	if (mc_fs_mutation_blocked(ev->filename)) {
+		LOG_WRN("refusing write to armed bundle %s", ev->filename);
+		*rc = MGMT_ERR_EBUSY;
+		*group = MGMT_GROUP_ID_FS;
+		return MGMT_CB_ERROR_RC;
+	}
+#endif
 	const char *why = NULL;
 	if (firmware_name_acceptable(ev->filename, &why)) {
 		return MGMT_CB_OK;

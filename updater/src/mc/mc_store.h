@@ -4,22 +4,28 @@
  * Persistent identity and counters on one 4 KB flash page.
  *
  *   0x000  header   magic, private key (64), public key (32), CRC-32
- *   0x080  records  16 bytes each, append-only: replay_ts, adv_ts, seq, CRC-32
+ *   0x080  records  16 bytes each, append-only: reserved (was replay_ts), adv_ts, seq, CRC-32
  *
  * Why not littlefs: the DFU bundles and config.txt live on a filesystem that
  * any BLE client can rewrite over SMP (fsx_mgmt has no path restrictions). The
- * node's private key and the operator replay counter must not be on it.
+ * node's private key must not be on it.
  *
- * Why append-only records: the replay counter changes on every privileged
- * command and every advert. Rewriting one slot would wear a single cell and a
- * torn write would lose it; appending 16-byte records spreads the wear over the
- * page and a torn record is just skipped (its CRC fails).
+ * Why append-only records: a rewritten slot would wear one cell and a torn
+ * write would lose it; appending 16-byte records spreads the wear over the page
+ * and a torn record is just skipped (its CRC fails).
+ *
+ * How often it is written: only the advert-timestamp high-water mark lives
+ * here (mc_node.h), once for the first advert and then at most once per day of
+ * uptime. Replay protection is a RAM-only token, so a privileged command costs
+ * no flash write. 248 records at one a day is most of a year of continuous
+ * uptime per rollover, and a reflash of the application or a reboot writes
+ * nothing.
  *
  * The weak point, stated plainly: when the page fills (248 records) it must be
  * erased, which erases the identity too, and it is rewritten from RAM straight
  * after. A power cut inside that window (~100 ms) loses the identity, and the
  * node will generate a new one on the next boot, which the operator must
- * re-add. At the default settings that happens about every two months.
+ * re-add. The glue logs a warning once the page is 80% used.
  *
  * Portable: flash access goes through struct mc_flash so the host tests can
  * run it on a RAM page that enforces NOR semantics (a write can only clear

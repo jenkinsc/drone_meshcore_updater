@@ -57,6 +57,9 @@
 #include <string.h>
 
 #include "app.h"
+#ifdef CONFIG_MC_CMD_ENFORCE
+#include "mc/mc_zephyr.h"
+#endif
 
 LOG_MODULE_REGISTER(fsx_stream, LOG_LEVEL_INF);
 
@@ -270,6 +273,13 @@ static ssize_t on_ctrl_write(struct bt_conn *conn, const struct bt_gatt_attr *at
 			reply_error(conn, RC_UNSUPPORTED);
 			break;
 		}
+#ifdef CONFIG_MC_CMD_ENFORCE
+		if (mc_fs_mutation_blocked(s_sess.path)) {
+			LOG_WRN("start rejected: %s is armed", s_sess.path);
+			reply_error(conn, RC_OPEN_FAILED);
+			break;
+		}
+#endif
 		const uint8_t *sp = &p[2 + name_len];
 		s_sess.expected = (uint32_t)sp[0] | ((uint32_t)sp[1] << 8)
 				| ((uint32_t)sp[2] << 16) | ((uint32_t)sp[3] << 24);

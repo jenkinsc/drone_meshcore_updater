@@ -4,13 +4,6 @@
 
 /* ================================ SHA-256 ================================== */
 
-struct sha256 {
-	uint32_t h[8];
-	uint8_t  buf[64];
-	uint32_t blen;
-	uint64_t total;
-};
-
 static const uint32_t K[64] = {
 	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
 	0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -24,7 +17,7 @@ static const uint32_t K[64] = {
 
 #define ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
 
-static void sha_block(struct sha256 *s, const uint8_t *p)
+static void sha_block(struct mc_sha256_ctx *s, const uint8_t *p)
 {
 	uint32_t w[64], a, b, c, d, e, f, g, h;
 
@@ -52,7 +45,7 @@ static void sha_block(struct sha256 *s, const uint8_t *p)
 	s->h[4] += e; s->h[5] += f; s->h[6] += g; s->h[7] += h;
 }
 
-static void sha_init(struct sha256 *s)
+void mc_sha256_init(struct mc_sha256_ctx *s)
 {
 	static const uint32_t H0[8] = {
 		0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
@@ -63,7 +56,7 @@ static void sha_init(struct sha256 *s)
 	s->total = 0;
 }
 
-static void sha_update(struct sha256 *s, const uint8_t *d, size_t n)
+void mc_sha256_update(struct mc_sha256_ctx *s, const uint8_t *d, size_t n)
 {
 	s->total += n;
 	while (n) {
@@ -82,21 +75,21 @@ static void sha_update(struct sha256 *s, const uint8_t *d, size_t n)
 	}
 }
 
-static void sha_final(struct sha256 *s, uint8_t out[32])
+void mc_sha256_final(struct mc_sha256_ctx *s, uint8_t out[32])
 {
 	uint64_t bits = s->total * 8;
 	uint8_t pad = 0x80;
 
-	sha_update(s, &pad, 1);
+	mc_sha256_update(s, &pad, 1);
 	pad = 0;
 	while (s->blen != 56) {
-		sha_update(s, &pad, 1);
+		mc_sha256_update(s, &pad, 1);
 	}
 	uint8_t len[8];
 	for (int i = 0; i < 8; i++) {
 		len[i] = (uint8_t)(bits >> (56 - 8 * i));
 	}
-	sha_update(s, len, 8);
+	mc_sha256_update(s, len, 8);
 	for (int i = 0; i < 8; i++) {
 		out[4 * i]     = (uint8_t)(s->h[i] >> 24);
 		out[4 * i + 1] = (uint8_t)(s->h[i] >> 16);
@@ -108,40 +101,40 @@ static void sha_final(struct sha256 *s, uint8_t out[32])
 void mc_sha256(const uint8_t *a, size_t alen, const uint8_t *b, size_t blen,
 	       uint8_t out[32])
 {
-	struct sha256 s;
+	struct mc_sha256_ctx s;
 
-	sha_init(&s);
-	sha_update(&s, a, alen);
+	mc_sha256_init(&s);
+	mc_sha256_update(&s, a, alen);
 	if (blen) {
-		sha_update(&s, b, blen);
+		mc_sha256_update(&s, b, blen);
 	}
-	sha_final(&s, out);
+	mc_sha256_final(&s, out);
 }
 
 void mc_hmac_sha256(const uint8_t key[32], const uint8_t *msg, size_t len,
 		    uint8_t out[32])
 {
 	uint8_t pad[64], inner[32];
-	struct sha256 s;
+	struct mc_sha256_ctx s;
 
 	/* Key is exactly 32 bytes (< block size), so it is used zero-padded. */
 	memset(pad, 0x36, sizeof(pad));
 	for (int i = 0; i < 32; i++) {
 		pad[i] ^= key[i];
 	}
-	sha_init(&s);
-	sha_update(&s, pad, 64);
-	sha_update(&s, msg, len);
-	sha_final(&s, inner);
+	mc_sha256_init(&s);
+	mc_sha256_update(&s, pad, 64);
+	mc_sha256_update(&s, msg, len);
+	mc_sha256_final(&s, inner);
 
 	memset(pad, 0x5c, sizeof(pad));
 	for (int i = 0; i < 32; i++) {
 		pad[i] ^= key[i];
 	}
-	sha_init(&s);
-	sha_update(&s, pad, 64);
-	sha_update(&s, inner, 32);
-	sha_final(&s, out);
+	mc_sha256_init(&s);
+	mc_sha256_update(&s, pad, 64);
+	mc_sha256_update(&s, inner, 32);
+	mc_sha256_final(&s, out);
 }
 
 /* ================================= AES-128 ================================= */

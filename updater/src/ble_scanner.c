@@ -214,6 +214,13 @@ static void log_rejected(const bt_addr_le_t *addr, const char *name,
 	LOG_INF("reject %s: %s rssi=%d name='%s'", reason, addr_s, rssi, name);
 }
 
+static ble_scanner_pin_filter_fn s_pin_filter;
+
+void ble_scanner_set_pin_filter(ble_scanner_pin_filter_fn fn)
+{
+	s_pin_filter = fn;
+}
+
 /* RX callback fires per received advertisement. */
 static void scan_rx_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
 		       struct net_buf_simple *ad)
@@ -229,6 +236,12 @@ static void scan_rx_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
 	 * at — it is usually the thing they are trying to look at. */
 	if (s_ctx.pinned_addr != NULL) {
 		if (!mac_match_or_plus_one(addr, s_ctx.pinned_addr)) {
+			return;
+		}
+		/* Optional identity policy (MeshCore-controlled builds): the
+		 * address rule above is only the coarse test. */
+		if (s_pin_filter && !s_pin_filter(addr, ap.name, ap.has_dfu_uuid)) {
+			log_rejected(addr, ap.name, rssi, "mc-id");
 			return;
 		}
 		goto matched;
@@ -487,13 +500,13 @@ static void survey_rx_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type
 {
 	ARG_UNUSED(adv_type);
 
-	ble_scanner_adv_fn obs = s_adv_observer;
-	if (obs) {
-		obs(addr, rssi);
-	}
-
 	struct ad_parse ap = { .name = { 0 }, .has_dfu_uuid = false };
 	bt_data_parse(ad, ad_data_cb, &ap);
+
+	ble_scanner_adv_fn obs = s_adv_observer;
+	if (obs) {
+		obs(addr, rssi, ap.has_dfu_uuid, ap.name);
+	}
 
 	k_spinlock_key_t key = k_spin_lock(&s_survey.lock);
 

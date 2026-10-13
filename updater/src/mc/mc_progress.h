@@ -6,30 +6,24 @@
  *
  * dfu_status publishes every state change and a progress tick several times a
  * second. Over MeshCore that would be hundreds of airtime-expensive messages,
- * most of them stale by the time they were delivered. What an operator on a
- * hilltop wants is the shape of the run: it started, it is a quarter, half,
- * three quarters of the way, the transfer finished, and how it ended.
+ * most of them stale by the time they were delivered, and every transmission
+ * is time the node is not listening. What an operator wants is the shape of
+ * the run, so during a DFU the only messages are:
  *
- * Messages, each emitted at most once per run:
+ *   START      the reply to the START command itself (not produced here)
+ *   25%  50%  75%   of the image streamed
+ *   VERIFYING  the transfer finished and the runner is checking that the
+ *              peer took it (only if the transport has a verify step)
+ *   SUCCESS or FAILURE   terminal, with the reason
  *
- *   MC_MSG_MILESTONE  0, 25, 50, 75, 100 (percent of the image streamed)
- *   MC_MSG_RETRY      a new attempt began (attempt number carried)
- *   MC_MSG_DONE       terminal success
- *   MC_MSG_FAILED     terminal failure (dfu_status_result carried)
+ * Each is emitted at most once per run. There is no 0% (START says the run
+ * began), no 100% (VERIFYING or SUCCESS says the transfer finished) and no
+ * retry message (retries go to the event log; `status` shows the attempt).
  *
- * "0%" means the transfer began, i.e. the run reached UPLOADING; it is not sent
- * at run start, because for most of a run's early life there is no transfer to
- * be at 0% of. "100%" is sent when the whole image has been streamed, which is
- * either percent == 100 or the run moving past UPLOADING (progress ticks are
- * coalesced upstream, so the final tick can be skipped; reaching VALIDATING
- * proves it happened).
- *
- * If progress jumps over several milestones in one update, each skipped
- * milestone is still reported, in order, so a listener never sees 0 then 75.
- *
- * Milestones are monotonic across a run: a retry restarts the byte counter but
- * does not re-announce 25% the operator has already been told about. The retry
- * message says that it happened.
+ * If one update jumps over several milestones only the highest is emitted:
+ * a listener told "50%" does not also need the stale "25%". Milestones are
+ * monotonic across a run: a retry restarts the byte counter but does not
+ * re-announce a quarter the operator already heard about.
  *
  * Pure logic; compiled by the host tests.
  */
@@ -46,26 +40,24 @@ extern "C" {
 
 enum mc_msg_kind {
 	MC_MSG_MILESTONE = 1,
-	MC_MSG_RETRY,
+	MC_MSG_VERIFYING,
 	MC_MSG_DONE,
 	MC_MSG_FAILED,
 };
 
 struct mc_progress_msg {
 	enum mc_msg_kind kind;
-	uint8_t  milestone;   /* MILESTONE: 0/25/50/75/100 */
-	uint8_t  attempt;     /* RETRY: new attempt, 1-based */
-	uint8_t  retries;     /* RETRY: attempt budget */
+	uint8_t  milestone;   /* MILESTONE: 25 / 50 / 75 */
 	enum dfu_status_result result;   /* FAILED (and DONE: always OK) */
 };
 
-/* At most five milestones plus one retry plus one terminal in a single update. */
-#define MC_PROGRESS_MAX_MSGS 8
+/* One update can yield at most a milestone, VERIFYING and a terminal. */
+#define MC_PROGRESS_MAX_MSGS 3
 
 struct mc_progress {
 	bool    active;
-	uint8_t next_milestone;   /* index into {0,25,50,75,100}; 5 = all sent */
-	uint8_t last_attempt;
+	uint8_t next_milestone;   /* index into {25,50,75}; 3 = all sent */
+	bool    verifying_sent;
 	bool    terminal_sent;
 };
 
@@ -73,11 +65,11 @@ struct mc_progress {
 void mc_progress_begin(struct mc_progress *p);
 
 /* Stop tracking without a terminal message (operator abort, or the runner was
- * reset). Further updates are ignored until the next begin. */
+ * reset from elsewhere). */
 void mc_progress_end(struct mc_progress *p);
 
 /* Feed one dfu_status event; returns how many messages were written to `out`
- * (up to MC_PROGRESS_MAX_MSGS). */
+ * (at most MC_PROGRESS_MAX_MSGS). */
 size_t mc_progress_update(struct mc_progress *p,
 			  const struct dfu_status_event *ev,
 			  struct mc_progress_msg *out);

@@ -13,6 +13,8 @@
  * callback, DFU status changes, the DIO1 interrupt) and never touch that state.
  */
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -23,6 +25,14 @@ extern "C" {
  * start. A radio or storage fault is logged and leaves the interface inert; it
  * never affects the BLE side. */
 int mc_init(void);
+
+/* The DFU runner's gate: consume the start authorisation for this exact path
+ * and pin, from the thread it was granted to. False = refuse the start. */
+bool mc_authz_dfu_begin(const char *path, const char *pin);
+
+/* True if `path` (a file-system path from any non-MeshCore entry point: SMP
+ * fs group, the fsx writer) would modify the bundle that is armed. */
+bool mc_fs_mutation_blocked(const char *path);
 
 #ifdef __cplusplus
 }
