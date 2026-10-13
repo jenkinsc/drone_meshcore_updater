@@ -175,6 +175,10 @@ static const char *const NAMES[MC_CMD_COUNT] = {
 	[MC_CMD_VERSION] = "version",
 	[MC_CMD_BATTERY] = "battery",
 	[MC_CMD_LOG]     = "log",
+	[MC_CMD_DIAG]    = "diag",
+	[MC_CMD_RADIO]   = "radio",
+	[MC_CMD_BLE]     = "ble",
+	[MC_CMD_STORAGE] = "storage",
 };
 
 const char *mc_cmd_name(enum mc_cmd_id id)

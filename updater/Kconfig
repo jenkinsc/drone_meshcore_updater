@@ -66,6 +66,28 @@ config MC_LAB
 	  the console; the production build leaves it off. State transitions and
 	  command results are always logged (they are the audit trail).
 
+config MC_LAB_KEEP_SCANNING
+	bool "Lab: keep the BLE survey scan running while idle"
+	depends on MC_LAB
+	help
+	  The survey scan normally stops 6 s after the last `scan`. With this
+	  on, the mc thread restarts it every 3 s while IDLE so the BLE
+	  coexistence test can run for 10 minutes without operator commands.
+	  It does not start a DFU and is off in the `dfu` profile.
+
+config MC_DFU_DRY_RUN
+	bool "DFU dry run: run every check, never touch the target"
+	depends on MC_CMD
+	default y
+	help
+	  Every control path runs (ARM, BLE target match, RSSI qualification,
+	  digest checks, START token, authorisation) but the DFU runner returns
+	  before it scans, connects, erases or writes anything, and START
+	  answers "DRY RUN PASS". Default y so that a build which does not
+	  decide is the harmless one. A build that is meant to flash a target
+	  must say CONFIG_MC_DFU_DRY_RUN=n explicitly (the `dfu` profile does,
+	  and build-meshcore.sh refuses it unless MC_DISABLE_DRY_RUN=yes).
+
 config MC_THREAD_STACK
 	int "mc thread stack (bytes)"
 	default 6144

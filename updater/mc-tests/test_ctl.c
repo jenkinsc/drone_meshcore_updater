@@ -963,8 +963,88 @@ static void test_ctl(void)
 	CHECK(strlen(R) <= MC_REPLY_MAX);
 }
 
+static void test_lab_features(void)
+{
+	struct mc_ctl c;
+	struct fake f;
+	struct mc_cmd cmd;
+	SECTION("lab diagnostics, state log format, dry run");
+
+	/* new read-only commands parse, are not privileged, take no arguments */
+	const char *names[] = { "diag", "radio", "ble", "storage" };
+	for (int i = 0; i < 4; i++) {
+		CHECK(mc_cmd_parse(names[i], &cmd) == MC_PARSE_OK);
+		CHECK(!mc_cmd_privileged(cmd.id) && !mc_cmd_needs_token(cmd.id));
+		char t[16]; snprintf(t, sizeof(t), "%s x", names[i]);
+		CHECK(mc_cmd_parse(t, &cmd) == MC_PARSE_USAGE);
+	}
+	/* a build without them says so, and nothing else happens */
+	ctl_setup(&c, &f);
+	for (int i = 0; i < 4; i++) {
+		H(&c, false, names[i]);
+		CHECK(strstr(R, "lab build only") && c.state == MC_IDLE);
+	}
+	/* with the ops present, any sender may ask, state is untouched */
+	ctl_setup(&c, &f);
+	mc_ctl_init(&c, &FOPS_DIAG, &f, &CFG);
+	H(&c, false, "diag"); CHECK(!strcmp(R, "diag-diag"));
+	H(&c, false, "radio"); CHECK(!strcmp(R, "diag-radio"));
+	H(&c, false, "ble"); CHECK(!strcmp(R, "diag-ble"));
+	H(&c, false, "storage"); CHECK(!strcmp(R, "diag-storage"));
+	CHECK(f.diag_calls == 4 && c.state == MC_IDLE && f.start_calls == 0);
+
+	/* STATE old -> new : reason, for every transition on the happy path */
+	ctl_setup(&c, &f);
+	get_armed(&c, &f);
+	start_tok(&c);
+	dfu_ev(&c, DFU_STATUS_DONE, 100, DFU_STATUS_RESULT_OK);
+	const char *want[] = {
+		"STATE IDLE -> WAITING : ARM accepted",
+		"STATE WAITING -> TARGET_DETECTED : MAC matched",
+		"STATE TARGET_DETECTED -> RSSI_QUALIFIED : hold complete",
+		"STATE RSSI_QUALIFIED -> ARMED : bundle digest verified",
+		"STATE ARMED -> START_AUTHORIZED : valid operator token",
+		"STATE START_AUTHORIZED -> DFU_ACTIVE : permit consumed",
+		"STATE DFU_ACTIVE -> IDLE : success",
+	};
+	for (size_t i = 0; i < sizeof(want) / sizeof(want[0]); i++) {
+		CHECK(has_note(&f, want[i]));
+	}
+	/* every state change carries a reason: no bare "A -> B" lines */
+	for (int i = 0; i < f.nnotes; i++) {
+		if (strstr(f.notes[i], "STATE ")) CHECK(strstr(f.notes[i], " : "));
+	}
+
+	/* dry run: all checks run, START reports PASS, nothing is started */
+	ctl_setup(&c, &f);
+	f.dry = true;
+	get_armed(&c, &f);
+	start_tok(&c);
+	CHECK(strstr(R, "DRY RUN PASS FW ") && strstr(R, ADDR));
+	CHECK(c.state == MC_IDLE && f.az.state == MC_AZ_IDLE && f.locked[0] == '\0');
+	CHECK(f.start_calls == 1 && f.runner_consumed);        /* the gate path was exercised */
+	CHECK(has_note(&f, "START_AUTHORIZED -> IDLE : dry run complete"));
+	H(&c, true, "status"); CHECK(strstr(R, "last=dry run pass"));
+	/* the dry run still obeys every gate: unarmed / unqualified / bad token refuse */
+	ctl_setup(&c, &f);
+	f.dry = true;
+	start_tok(&c); CHECK(strstr(R, "not armed") && f.start_calls == 0);
+	H(&c, true, "status");
+	{ char cmdl[96]; snprintf(cmdl, sizeof(cmdl), ARM_NOTOK " %s", tok_of(R)); H(&c, true, cmdl); }
+	adv_run(&c, &f, 2000, 500, -60);
+	start_tok(&c); CHECK(strstr(R, "refused") && f.start_calls == 0);
+	strcpy(f.content, "other");
+	adv_run(&c, &f, 5000, 500, -60);
+	CHECK(c.state == MC_IDLE);                                  /* digest mismatch cancelled it */
+	/* and it is repeatable: arm again, pass again */
+	strcpy(f.content, "firmware v1");
+	get_armed(&c, &f);
+	start_tok(&c); CHECK(strstr(R, "DRY RUN PASS"));
+}
+
 void run_ctl_tests(void)
 {
+	test_lab_features();
 	test_layout();
 	test_pathguard();
 	test_gate();

@@ -30,6 +30,9 @@
 #include "mc_target.h"
 #include "mc_radio.h"
 #include "mc_store.h"
+#ifdef CONFIG_MC_LAB
+#include "mc_lab.h"
+#endif
 
 LOG_MODULE_REGISTER(mc, LOG_LEVEL_INF);
 
@@ -56,6 +59,19 @@ static struct mc_node    s_node;
 static struct mc_store   s_store;
 static struct mc_evlog   s_evlog;
 static struct mc_radio_rx s_rx;         /* static: too big for the thread stack */
+static uint32_t s_reset_cause;          /* from main.c: the hardware latch is cleared there */
+static bool     s_reset_cause_set;
+#ifdef CONFIG_MC_LAB
+static enum mc_lab_idstat s_lab_idstat;
+static bool     s_lab_op_ok;
+static uint8_t  s_lab_op_pub[MC_PUB_KEY_SIZE];
+#endif
+
+void mc_note_reset_cause(uint32_t cause)
+{
+	s_reset_cause = cause;
+	s_reset_cause_set = true;
+}
 
 /* ---- state shared with the BLE and DFU threads --------------------------- */
 
@@ -91,7 +107,6 @@ static void post(uint8_t type, int8_t rssi)
 static void adv_observer(const bt_addr_le_t *a, int8_t rssi, bool dfu_uuid,
 			 const char *name)
 {
-	ARG_UNUSED(name);
 	uint8_t le[6];
 	char t;
 	bool on;
@@ -101,6 +116,9 @@ static void adv_observer(const bt_addr_le_t *a, int8_t rssi, bool dfu_uuid,
 	memcpy(le, s_watch_le, 6);
 	t = s_watch_type;
 	k_spin_unlock(&s_lock, k);
+#ifdef CONFIG_MC_LAB
+	mc_lab_adv(a, rssi, dfu_uuid, name, on ? le : NULL);
+#endif
 
 	/* Exact identity only: six octets and the address type. */
 	if (!on || !mc_addr_equal(le, t, a->a.val, a->type)) {
@@ -405,6 +423,9 @@ static const struct mc_ops OPS = {
 	.dfu_abort = op_dfu_abort, .dfu_busy = op_dfu_busy, .battery = op_battery,
 	.version = op_version, .log_page = op_log_page, .report = op_report,
 	.note = op_note,
+#ifdef CONFIG_MC_LAB
+	.diag = mc_lab_diag,
+#endif
 };
 
 /* ---- node ops ------------------------------------------------------------ */
@@ -507,8 +528,13 @@ static int load_identity(struct mc_persist *persisted)
 		return -ENODEV;
 	}
 	int rc = mc_store_load(&s_store, &FLASH, persisted);
+	const int rc_load = rc;
+
 	if (rc == MC_STORE_OK && mc_id_from_private(&s_id, s_store.prv) &&
 	    memcmp(s_id.pub, s_store.pub, MC_PUB_KEY_SIZE) == 0) {
+#ifdef CONFIG_MC_LAB
+		s_lab_idstat = MC_LAB_ID_LOADED;
+#endif
 		return 0;
 	}
 	if (rc == MC_STORE_IOERR) {
@@ -536,6 +562,9 @@ static int load_identity(struct mc_persist *persisted)
 		return -EIO;
 	}
 	memset(persisted, 0, sizeof(*persisted));
+#ifdef CONFIG_MC_LAB
+	s_lab_idstat = (rc_load == MC_STORE_OK) ? MC_LAB_ID_REGENERATED : MC_LAB_ID_GENERATED;
+#endif
 	return 0;
 }
 
@@ -571,6 +600,9 @@ static void mc_thread(void *a, void *b, void *c)
 
 	if (load_identity(&persisted) != 0) {
 		LOG_ERR("MeshCore interface disabled (identity)");
+#ifdef CONFIG_MC_LAB
+		mc_lab_init_failed("identity storage", -EIO);
+#endif
 		return;
 	}
 	char h[65];
@@ -583,6 +615,10 @@ static void mc_thread(void *a, void *b, void *c)
 			strlen(CONFIG_MC_OPERATOR_PUBKEY) ? "not 64 hex characters" : "empty");
 	} else {
 		mc_id_set_operator(&s_id, op_pub);
+#ifdef CONFIG_MC_LAB
+		s_lab_op_ok = true;
+		memcpy(s_lab_op_pub, op_pub, sizeof(op_pub));
+#endif
 	}
 
 	BUILD_ASSERT(CONFIG_MC_RSSI_FLOOR <= CONFIG_MC_AVG_RSSI_MIN,
@@ -614,6 +650,28 @@ static void mc_thread(void *a, void *b, void *c)
 
 	int rc = mc_radio_init(radio_irq);
 
+#ifdef CONFIG_MC_LAB
+	uint32_t cause = 0;
+
+	if (s_reset_cause_set) {
+		cause = s_reset_cause;
+	} else {
+		(void)hwinfo_get_reset_cause(&cause);
+		(void)hwinfo_clear_reset_cause();
+	}
+	{
+		struct mc_lab_env env = {
+			.ctl = &s_ctl, .store = &s_store, .id = &s_id, .flash = &FLASH,
+			.thread = &s_thread, .queue = &s_q, .bundle_dir = BUNDLE_DIR,
+			.id_start = ID_OFF, .id_end = ID_OFF + MC_STORE_PAGE,
+			.id_stat = s_lab_idstat, .op_key_ok = s_lab_op_ok, .reset_cause = cause,
+			.lost = (const volatile long *)&s_lost,
+		};
+		memcpy(env.op_pub, s_lab_op_pub, sizeof(s_lab_op_pub));
+		mc_lab_bind(&env);
+		mc_lab_boot_report(rc);
+	}
+#endif
 	if (rc) {
 		LOG_ERR("MeshCore interface disabled (radio rc=%d)", rc);
 		return;
@@ -627,10 +685,16 @@ static void mc_thread(void *a, void *b, void *c)
 	uint32_t next_adv = k_uptime_get_32() + 15000u + (sys_rand32_get() % 15000u);
 	uint32_t ticks = 0;
 
+#ifndef CONFIG_MC_LAB
 	uint32_t cause = 0;
 
-	(void)hwinfo_get_reset_cause(&cause);
-	(void)hwinfo_clear_reset_cause();
+	if (s_reset_cause_set) {
+		cause = s_reset_cause;
+	} else {
+		(void)hwinfo_get_reset_cause(&cause);
+		(void)hwinfo_clear_reset_cause();
+	}
+#endif
 	LOG_INF("MeshCore interface up: avg>=%d floor=%d hold=%ums min=%u arm=%us reset=0x%x",
 		cfg.gate.avg_min, cfg.gate.floor, (unsigned)cfg.gate.hold_ms,
 		(unsigned)cfg.gate.min_samples, (unsigned)cfg.arm_timeout_s, (unsigned)cause);
@@ -669,7 +733,8 @@ static void mc_thread(void *a, void *b, void *c)
 			}
 			/* The survey's own idle timer is 6 s; poll it while armed so
 			 * the gate keeps getting samples. */
-			if (s_ctl.state >= MC_WAITING && s_ctl.state <= MC_ARMED &&
+			if (((s_ctl.state >= MC_WAITING && s_ctl.state <= MC_ARMED) ||
+			     (IS_ENABLED(CONFIG_MC_LAB_KEEP_SCANNING) && s_ctl.state == MC_IDLE)) &&
 			    (++ticks % 3u) == 0) {
 				(void)ble_scanner_survey_start();
 			}

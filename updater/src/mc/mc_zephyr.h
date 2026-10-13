@@ -14,6 +14,7 @@
  */
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,6 +30,9 @@ int mc_init(void);
 /* The DFU runner's gate: consume the start authorisation for this exact path
  * and pin, from the thread it was granted to. False = refuse the start. */
 bool mc_authz_dfu_begin(const char *path, const char *pin);
+
+/* Called from main.c with the reset cause it read (and cleared) at boot. */
+void mc_note_reset_cause(uint32_t cause);
 
 /* True if `path` (a file-system path from any non-MeshCore entry point: SMP
  * fs group, the fsx writer) would modify the bundle that is armed. */

@@ -756,6 +756,14 @@ int dfu_runner_start(const char *zip_path, const char *pin,
 	}
 #endif
 
+#ifdef CONFIG_MC_DFU_DRY_RUN
+	/* Lab dry run: the authorisation above was consumed (the gate path is
+	 * exercised) but nothing below runs: no scan, no connection, no erase,
+	 * no write. 1 = "would have started" (MC_START_DRY_RUN). */
+	LOG_WRN("DFU DRY RUN: not starting (CONFIG_MC_DFU_DRY_RUN=y)");
+	return 1;
+#endif
+
 	k_mutex_lock(&s_lock, K_FOREVER);
 	if (s_busy) {
 		k_mutex_unlock(&s_lock);

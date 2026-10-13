@@ -61,6 +61,10 @@ enum mc_cmd_id {
 	MC_CMD_VERSION,
 	MC_CMD_BATTERY,
 	MC_CMD_LOG,
+	MC_CMD_DIAG,      /* lab-only diagnostics, read-only */
+	MC_CMD_RADIO,
+	MC_CMD_BLE,
+	MC_CMD_STORAGE,
 	MC_CMD_COUNT
 };
 

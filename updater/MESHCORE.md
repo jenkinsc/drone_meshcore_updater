@@ -4,6 +4,9 @@ An optional layer that lets an operator drive the updater over LoRa using
 MeshCore direct messages. The Nordic BLE DFU implementation is unchanged; this
 layer only decides *when* a DFU may start and reports what it does.
 
+> **Hardware bring-up:** see [HARDWARE_VALIDATION.md](HARDWARE_VALIDATION.md) (lab / dry-run / dfu
+> profiles, boot log, diagnostic commands, test procedures). The feature set is frozen for that phase.
+
 > **Status: hardened first pass. Host-tested, builds and links, has NOT been run
 > on hardware. Not production-ready.** Treat everything below as a design that
 > still has to survive a bench. See [Known risks](#known-risks).
@@ -20,6 +23,8 @@ MC_PROFILE=prod ./build-meshcore.sh    # production-candidate profile
 | Profile | Output directory | Adds |
 |---|---|---|
 | `lab` | `updater/build_xiao_ble_nrf52840_meshcore_lab/` | `boards/meshcore/xiao_ble_wio_sx1262_lab.conf`: `CONFIG_MC_LAB=y` (verbose LoRa / scan / gate / DFU logging). USB console and the littlefs log backend stay on. |
+| `dryrun` | `..._meshcore_dryrun/` | Same config as `lab` (`CONFIG_MC_DFU_DRY_RUN=y`): START answers `DRY RUN PASS`, the DFU runner never scans, erases or writes. |
+| `dfu` | `..._meshcore_dfu/` | Lab + `CONFIG_MC_DFU_DRY_RUN=n`. **Flashes the target.** Needs `MC_DISABLE_DRY_RUN=yes` or the build refuses. |
 | `prod` | `updater/build_xiao_ble_nrf52840_meshcore_prod/` | `..._prod.conf`: compile-time log level capped at WARNING. USB console kept (see below). |
 
 Both start from `prj.conf` + `boards/xiao_ble.conf` + `boards/meshcore/xiao_ble_wio_sx1262.{conf,overlay}`
@@ -36,6 +41,9 @@ Artifacts per profile: `merged.uf2` (flash this), `merged.hex` (SWD probe),
 | First pass (commit 91fb630) | 387,844 B (99.71 %) | 1,126 B | 130,992 B (49.97 %) |
 | **Hardened, lab** | **380,940 B (97.94 %)** | **8,030 B** | **130,096 B (49.63 %)** |
 | **Hardened, prod** | **368,328 B (94.69 %)** | **20,642 B** | 130,096 B (49.63 %) |
+| *Bring-up phase:* lab / dryrun (dry run on) | 379,756 B (97.63 %) | 9,214 B | 121,648 B |
+| *Bring-up phase:* dfu (lab + real flashing) | 386,980 B (99.49 %) | **1,990 B** | 130,288 B |
+| *Bring-up phase:* prod | 369,288 B (94.94 %) | 19,682 B | 130,160 B |
 | MCUboot (unchanged) | 33,892 B of 40 KB (82.74 %) | | 16,512 B |
 
 What moved (by archive, from the link map; first pass → lab): CryptoCell-310
@@ -131,6 +139,7 @@ error, not ignored.
 | `version` | no | Firmware version |
 | `battery` | no | Battery voltage |
 | `log [page]` | no | Recent events, newest first (RAM ring) |
+| `diag` `radio` `ble` `storage` | no | **Lab builds only**: read-only bring-up diagnostics (see HARDWARE_VALIDATION.md); `lab build only` otherwise |
 
 ### Operator workflow (tokens)
 
@@ -441,6 +450,6 @@ Run:
 * The RAM event log (`log`) is lost on reboot; the Zephyr log backend to littlefs keeps more.
 * CC3XX was removed from the MeshCore build only; PSA crypto now uses the Oberon software driver
   (a different code path from the stock image — covered by host vectors but not by hardware).
-* Flash margin: lab 8.0 KB, prod 20.6 KB; any further feature needs another trim (USB off is the
+* Flash margin: dfu image 2.0 KB (lab with dry run 9.2 KB), prod 19.7 KB; any further feature needs another trim (USB off is the
   big one).
 * Nothing here has been security-reviewed by anyone other than its author.

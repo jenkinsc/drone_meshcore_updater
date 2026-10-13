@@ -73,10 +73,10 @@ static void note(struct mc_ctl *c, const char *fmt, ...)
 	c->ops->note(c->ctx, line);
 }
 
-static void set_state(struct mc_ctl *c, enum mc_state s)
+static void set_state(struct mc_ctl *c, enum mc_state s, const char *why)
 {
 	if (c->state != s) {
-		note(c, "%s -> %s", mc_state_str(c->state), mc_state_str(s));
+		note(c, "STATE %s -> %s : %s", mc_state_str(c->state), mc_state_str(s), why);
 		c->state = s;
 	}
 }
@@ -186,7 +186,7 @@ static bool token_take(struct mc_ctl *c, const char *given)
 
 /* ---- common ------------------------------------------------------------- */
 
-static void to_idle(struct mc_ctl *c)
+static void to_idle(struct mc_ctl *c, const char *why)
 {
 	if (c->ops->watch) {
 		c->ops->watch(c->ctx, NULL, 0);
@@ -200,7 +200,7 @@ static void to_idle(struct mc_ctl *c)
 	memset(c->digest, 0, sizeof(c->digest));
 	c->target_dfu_mode = false;
 	mc_gate_reset(&c->gate);
-	set_state(c, MC_IDLE);
+	set_state(c, MC_IDLE, why);
 }
 
 static bool in_arm_phase(const struct mc_ctl *c)
@@ -280,7 +280,8 @@ static size_t cmd_status(struct mc_ctl *c, char *out, size_t cap)
 	case MC_IDLE:
 	default: {
 		static const char *const LAST[] = { "", " last=ok", " last=failed",
-			" last=aborted", " last=expired", " last=bundle changed" };
+			" last=aborted", " last=expired", " last=bundle changed",
+			" last=dry run pass" };
 
 		n = put(out, cap, "IDLE%s", LAST[c->last]);
 		if (c->last == MC_LAST_FAILED) {
@@ -352,7 +353,7 @@ static size_t cmd_arm(struct mc_ctl *c, const struct mc_cmd *cmd, char *out, siz
 	}
 
 	if (in_arm_phase(c)) {
-		to_idle(c);          /* re-arming replaces the previous selection */
+		to_idle(c, "re-armed");          /* re-arming replaces the previous selection */
 	}
 	strcpy(c->addr, cmd->addr);
 	c->addr_type = cmd->addr_type;
@@ -370,7 +371,7 @@ static size_t cmd_arm(struct mc_ctl *c, const struct mc_cmd *cmd, char *out, siz
 	if (c->ops->watch) {
 		c->ops->watch(c->ctx, c->addr, c->addr_type);
 	}
-	set_state(c, MC_WAITING);
+	set_state(c, MC_WAITING, "ARM accepted, valid operator token");
 
 	size_t n = put(out, cap, "ARM ok FW %s %s %c b=%s WAITING", c->fw, c->addr,
 		       c->addr_type, c->bundle);
@@ -386,7 +387,7 @@ static size_t cmd_disarm(struct mc_ctl *c, char *out, size_t cap)
 	if (c->state == MC_IDLE) {
 		return put(out, cap, "already IDLE");
 	}
-	to_idle(c);
+	to_idle(c, "operator disarm");
 	return put(out, cap, "IDLE");
 }
 
@@ -426,7 +427,7 @@ static size_t cmd_start(struct mc_ctl *c, const struct mc_cmd *cmd, char *out, s
 
 	if (v != MC_GATE_READY) {
 		gate_line(c, g, sizeof(g));
-		set_state(c, MC_TARGET_DETECTED);
+		set_state(c, MC_TARGET_DETECTED, "gate not ready at START");
 		n = put(out, cap, "START refused: %s", g);
 		with_token(c, out, cap, n);
 		return strlen(out);
@@ -434,7 +435,7 @@ static size_t cmd_start(struct mc_ctl *c, const struct mc_cmd *cmd, char *out, s
 	if (!digest_matches(c)) {
 		note(c, "bundle %s changed since ARM (FW %s)", c->bundle, c->fw);
 		c->last = MC_LAST_BUNDLE_CHANGED;
-		to_idle(c);
+		to_idle(c, "bundle changed since ARM");
 		n = put(out, cap, "START refused: bundle changed since ARM; IDLE");
 		with_token(c, out, cap, n);
 		return strlen(out);
@@ -450,13 +451,22 @@ static size_t cmd_start(struct mc_ctl *c, const struct mc_cmd *cmd, char *out, s
 
 	put(reply, sizeof(reply), "STARTED FW %s %s b=%s avg %d", c->fw, c->addr, c->bundle,
 	    mc_gate_avg(&c->gate));
-	set_state(c, MC_START_AUTHORIZED);
+	set_state(c, MC_START_AUTHORIZED, "valid operator token");
 	int rc = c->ops->dfu_start(c->ctx, c->bundle, c->addr, c->addr_type,
 				   !c->target_dfu_mode);
 
+	if (rc == MC_START_DRY_RUN) {
+		/* Compiled as a dry run: every check passed, nothing was started. */
+		c->ops->dfu_end(c->ctx);
+		c->last = MC_LAST_DRYRUN;
+		size_t n = put(out, cap, "DRY RUN PASS FW %s %s b=%s avg %d", c->fw, c->addr,
+			       c->bundle, mc_gate_avg(&c->gate));
+		to_idle(c, "dry run complete, nothing flashed");
+		return n;
+	}
 	if (rc != 0) {
 		c->ops->dfu_end(c->ctx);
-		set_state(c, MC_ARMED);
+		set_state(c, MC_ARMED, "runner refused to start");
 		n = put(out, cap, "START failed (rc %d); still ARMED", rc);
 		with_token(c, out, cap, n);
 		return strlen(out);
@@ -464,7 +474,7 @@ static size_t cmd_start(struct mc_ctl *c, const struct mc_cmd *cmd, char *out, s
 
 	mc_progress_begin(&c->prog);
 	memset(&c->ev, 0, sizeof(c->ev));
-	set_state(c, MC_DFU_ACTIVE);
+	set_state(c, MC_DFU_ACTIVE, "permit consumed by runner");
 	c->last = MC_LAST_NONE;
 	c->last_result = DFU_STATUS_RESULT_NONE;
 	if (c->ops->watch) {
@@ -505,11 +515,11 @@ static size_t cmd_abort(struct mc_ctl *c, char *out, size_t cap)
 		c->ops->dfu_end(c->ctx);
 		mc_progress_end(&c->prog);
 		c->last = MC_LAST_ABORTED;
-		to_idle(c);
+		to_idle(c, "operator abort");
 		return put(out, cap, "ABORTED; IDLE");
 	}
 	if (in_arm_phase(c)) {
-		to_idle(c);
+		to_idle(c, "operator abort while armed");
 		return put(out, cap, "ABORT: was only armed; IDLE");
 	}
 	return put(out, cap, "ABORT: nothing running");
@@ -539,7 +549,7 @@ size_t mc_ctl_handle(struct mc_ctl *c, bool authed, const char *text,
 	if (pe != MC_PARSE_OK) {
 		switch (pe) {
 		case MC_PARSE_UNKNOWN:
-			n = put(reply, cap, "? cmds: status scan rssi arm disarm start abort version battery log");
+			n = put(reply, cap, "? cmds: status scan rssi arm disarm start abort version battery log diag radio ble storage");
 			break;
 		case MC_PARSE_BAD_ADDR:
 			n = put(reply, cap, "bad address: need AA:BB:CC:DD:EE:FF");
@@ -579,6 +589,13 @@ size_t mc_ctl_handle(struct mc_ctl *c, bool authed, const char *text,
 		n = put(reply, cap, "%s", c->ops->version ? c->ops->version(c->ctx) : "?");
 		break;
 	case MC_CMD_BATTERY: n = cmd_battery(c, reply, cap); break;
+	case MC_CMD_DIAG:
+	case MC_CMD_RADIO:
+	case MC_CMD_BLE:
+	case MC_CMD_STORAGE:
+		n = c->ops->diag ? c->ops->diag(c->ctx, cmd.id, reply, cap)
+				 : put(reply, cap, "%s: lab build only", mc_cmd_name(cmd.id));
+		break;
 	case MC_CMD_LOG:
 		n = c->ops->log_page ? c->ops->log_page(c->ctx, cmd.page, reply, cap)
 				     : put(reply, cap, "log: not available");
@@ -610,18 +627,18 @@ static void evaluate(struct mc_ctl *c)
 	v = mc_gate_check(&c->gate, now);
 	if (v == MC_GATE_READY) {
 		if (c->state == MC_TARGET_DETECTED) {
-			set_state(c, MC_RSSI_QUALIFIED);
+			set_state(c, MC_RSSI_QUALIFIED, "hold complete");
 			if (!digest_matches(c)) {
 				report(c, 2, "ARM cancelled: bundle %s changed since ARM (FW %s)",
 				       c->bundle, c->fw);
 				c->last = MC_LAST_BUNDLE_CHANGED;
-				to_idle(c);
+				to_idle(c, "bundle changed since ARM");
 				return;
 			}
-			set_state(c, MC_ARMED);
+			set_state(c, MC_ARMED, "bundle digest verified");
 		}
 	} else if (c->state == MC_RSSI_QUALIFIED || c->state == MC_ARMED) {
-		set_state(c, MC_TARGET_DETECTED);
+		set_state(c, MC_TARGET_DETECTED, "gate lost the target");
 	}
 }
 
@@ -635,7 +652,7 @@ void mc_ctl_on_adv(struct mc_ctl *c, int8_t rssi, bool dfu_uuid)
 	}
 	mc_gate_sample(&c->gate, c->ops->now_ms(c->ctx), rssi);
 	if (c->state == MC_WAITING) {
-		set_state(c, MC_TARGET_DETECTED);
+		set_state(c, MC_TARGET_DETECTED, "MAC matched");
 	}
 	evaluate(c);
 }
@@ -646,7 +663,7 @@ void mc_ctl_samples_lost(struct mc_ctl *c)
 		mc_gate_reset(&c->gate);
 		note(c, "gate reset: samples lost");
 		if (c->state != MC_WAITING) {
-			set_state(c, MC_TARGET_DETECTED);
+			set_state(c, MC_TARGET_DETECTED, "samples lost");
 		}
 	}
 }
@@ -669,7 +686,7 @@ void mc_ctl_on_dfu_event(struct mc_ctl *c, const struct dfu_status_event *ev)
 		mc_progress_end(&c->prog);
 		c->ops->dfu_end(c->ctx);
 		c->last = MC_LAST_ABORTED;
-		to_idle(c);
+		to_idle(c, "runner reset elsewhere");
 		return;
 	}
 
@@ -690,14 +707,14 @@ void mc_ctl_on_dfu_event(struct mc_ctl *c, const struct dfu_status_event *ev)
 			c->last = MC_LAST_OK;
 			c->last_result = DFU_STATUS_RESULT_OK;
 			c->ops->dfu_end(c->ctx);
-			to_idle(c);
+			to_idle(c, "success");
 			break;
 		case MC_MSG_FAILED:
 			report(c, 2, "DFU FAILED %s: %s", c->addr, result_str(m->result));
 			c->last = MC_LAST_FAILED;
 			c->last_result = m->result;
 			c->ops->dfu_end(c->ctx);
-			to_idle(c);
+			to_idle(c, "failure");
 			break;
 		}
 	}
@@ -713,7 +730,7 @@ void mc_ctl_tick(struct mc_ctl *c)
 			report(c, 2, "ARM expired %s (no START in %us)", c->addr,
 			       (unsigned)c->cfg.arm_timeout_s);
 			c->last = MC_LAST_EXPIRED;
-			to_idle(c);
+			to_idle(c, "ARM timeout");
 		}
 	}
 	rq_flush(c);

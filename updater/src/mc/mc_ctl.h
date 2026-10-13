@@ -123,6 +123,10 @@ struct mc_ops {
 	 * mode, so its post-jump DFU address (A+1) is part of its identity. */
 	int (*dfu_start)(void *ctx, const char *bundle, const char *addr, char type,
 			 bool plus1_ok);
+	/* Lab-only read-only diagnostics (diag / radio / ble / storage). NULL in a
+	 * build without them. Returns the reply length. */
+	size_t (*diag)(void *ctx, int cmd_id, char *out, size_t cap);
+
 	/* The run is over (or never began): clear any platform-side authorisation. */
 	void (*dfu_end)(void *ctx);
 	int (*dfu_abort)(void *ctx);
@@ -155,7 +159,12 @@ enum mc_last {
 	MC_LAST_ABORTED,
 	MC_LAST_EXPIRED,
 	MC_LAST_BUNDLE_CHANGED,
+	MC_LAST_DRYRUN,
 };
+
+/* dfu_start() return value: the platform is built as a dry run. Every check
+ * passed, no DFU was started, nothing on the target was touched. */
+#define MC_START_DRY_RUN 1
 
 struct mc_cfg {
 	struct mc_gate_cfg gate;

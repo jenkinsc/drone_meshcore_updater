@@ -393,6 +393,9 @@ static void log_reset_cause(void)
 	/* Latched in hardware across resets: without this every later boot
 	 * inherits the first one's answer. */
 	(void)hwinfo_clear_reset_cause();
+#ifdef CONFIG_MC_CMD
+	mc_note_reset_cause(cause);     /* hardware latch is cleared; keep a copy */
+#endif
 
 	char buf[96];
 	size_t n = 0;

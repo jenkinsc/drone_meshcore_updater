@@ -21,10 +21,25 @@ if(DEFINED ENV{MC_WIO_SX1262} OR MC_WIO_SX1262)
   list(APPEND EXTRA_CONF_FILE ${MC_BOARD_DIR}/xiao_ble_wio_sx1262.conf)
   # Profile: lab (default) keeps verbose logging for the first hardware session;
   # prod compiles INFO logs out. Chosen by MC_PROFILE in the environment.
-  if("$ENV{MC_PROFILE}" STREQUAL "prod")
+  # Profiles: lab / dryrun (the same config: diagnostics + CONFIG_MC_DFU_DRY_RUN=y),
+  # dfu (diagnostics + dry run explicitly OFF; the real-flash image) and prod.
+  set(_mc_profile "$ENV{MC_PROFILE}")
+  if("${_mc_profile}" STREQUAL "")
+    set(_mc_profile lab)
+  endif()
+  if("${_mc_profile}" STREQUAL "prod")
     list(APPEND EXTRA_CONF_FILE ${MC_BOARD_DIR}/xiao_ble_wio_sx1262_prod.conf)
-  else()
+  elseif("${_mc_profile}" STREQUAL "dfu")
+    if(NOT "$ENV{MC_DISABLE_DRY_RUN}" STREQUAL "yes")
+      message(FATAL_ERROR "MC_PROFILE=dfu builds a firmware that ERASES AND WRITES the target. "
+                          "Set MC_DISABLE_DRY_RUN=yes to confirm CONFIG_MC_DFU_DRY_RUN=n.")
+    endif()
+    list(APPEND EXTRA_CONF_FILE ${MC_BOARD_DIR}/xiao_ble_wio_sx1262_lab.conf
+                                ${MC_BOARD_DIR}/xiao_ble_wio_sx1262_dfu.conf)
+  elseif("${_mc_profile}" STREQUAL "lab" OR "${_mc_profile}" STREQUAL "dryrun")
     list(APPEND EXTRA_CONF_FILE ${MC_BOARD_DIR}/xiao_ble_wio_sx1262_lab.conf)
+  else()
+    message(FATAL_ERROR "unknown MC_PROFILE '${_mc_profile}' (lab, dryrun, dfu, prod)")
   endif()
   # The operator's key. Git-ignored, so a key is never committed by accident.
   if(EXISTS ${MC_BOARD_DIR}/operator.conf)
@@ -128,4 +143,19 @@ if(CONFIG_MC_CMD)
   # Floor for advert timestamps (there is no RTC): the build time, UTC seconds.
   string(TIMESTAMP MC_BUILD_EPOCH "%s" UTC)
   target_compile_definitions(app PRIVATE MC_BUILD_EPOCH=${MC_BUILD_EPOCH}u)
+  # Bring-up identification: which source and which profile is on the board.
+  execute_process(COMMAND git -C ${CMAKE_CURRENT_SOURCE_DIR} rev-parse --short=12 HEAD
+                  OUTPUT_VARIABLE MC_GIT_HASH OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  execute_process(COMMAND git -C ${CMAKE_CURRENT_SOURCE_DIR} status --porcelain --untracked-files=no
+                  OUTPUT_VARIABLE MC_GIT_DIRTY OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  if("${MC_GIT_HASH}" STREQUAL "")
+    set(MC_GIT_HASH unknown)
+  elseif(NOT "${MC_GIT_DIRTY}" STREQUAL "")
+    set(MC_GIT_HASH "${MC_GIT_HASH}+dirty")
+  endif()
+  target_compile_definitions(app PRIVATE MC_GIT_HASH="${MC_GIT_HASH}"
+                                         MC_PROFILE_NAME="${_mc_profile}")
+  if(CONFIG_MC_LAB)
+    target_sources(app PRIVATE src/mc/mc_lab.c)
+  endif()
 endif()

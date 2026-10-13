@@ -34,6 +34,8 @@ struct fake {
 	bool bypass_ok;                /* an "other thread" consume during START worked */
 	bool busy;
 	int start_rc;
+	bool dry;                      /* simulate a CONFIG_MC_DFU_DRY_RUN build */
+	int diag_calls;
 
 	char watching[24];
 	char locked[64];
@@ -115,6 +117,7 @@ static UNUSED int f_start(void *c, const char *b, const char *a, char t, bool pl
 	/* an unrelated caller (SMP trigger, auto_flash) tries to use it */
 	f->bypass_ok = mc_authz_consume(&f->az, WHO_OTHER, path, pin);
 	if (f->start_rc == 0) f->runner_consumed = mc_authz_consume(&f->az, WHO_MC, path, pin);
+	if (f->dry && f->start_rc == 0) return MC_START_DRY_RUN;
 	return f->start_rc;
 }
 static UNUSED void f_end(void *c) { struct fake *f = c; f->end_calls++; mc_authz_end(&f->az); }
@@ -134,11 +137,25 @@ static UNUSED void f_note(void *c, const char *m)
 	if (f->nnotes < 128) snprintf(f->notes[f->nnotes++], 160, "%s", m);
 }
 
+static UNUSED size_t f_diag(void *c, int id, char *o, size_t cap)
+{
+	((struct fake *)c)->diag_calls++;
+	return (size_t)snprintf(o, cap, "diag-%s", mc_cmd_name((enum mc_cmd_id)id));
+}
+
 static const UNUSED struct mc_ops FOPS = {
 	.now_ms = f_now, .rand32 = f_rand, .scan_rows = f_scan, .watch = f_watch,
 	.bundle_digest = f_digest, .bundle_lock = f_lock, .dfu_start = f_start,
 	.dfu_end = f_end, .dfu_abort = f_abort, .dfu_busy = f_busy, .battery = f_batt,
 	.version = f_ver, .log_page = f_logp, .report = f_report, .note = f_note,
+};
+
+static const UNUSED struct mc_ops FOPS_DIAG = {
+	.now_ms = f_now, .rand32 = f_rand, .scan_rows = f_scan, .watch = f_watch,
+	.bundle_digest = f_digest, .bundle_lock = f_lock, .dfu_start = f_start,
+	.dfu_end = f_end, .dfu_abort = f_abort, .dfu_busy = f_busy, .battery = f_batt,
+	.version = f_ver, .log_page = f_logp, .report = f_report, .note = f_note,
+	.diag = f_diag,
 };
 
 static const UNUSED struct mc_cfg CFG = {

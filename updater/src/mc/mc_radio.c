@@ -67,6 +67,7 @@ static struct spi_config spi_cfg = {
 #define REG_RX_GAIN   0x08AC
 #define REG_OCP       0x08E7
 
+static struct mc_radio_stats st;
 static struct gpio_callback dio1_cb;
 static void (*notify)(void);
 
@@ -81,6 +82,7 @@ static int wait_busy(uint32_t ms)
 	 * sleep, so a slow BUSY never holds the CPU against the BLE threads. */
 	while (gpio_pin_get_dt(&g_busy) > 0) {
 		if (k_uptime_get() > end) {
+			st.busy_timeouts++;
 			return -ETIMEDOUT;
 		}
 		if (k_uptime_get() < spin_end) {
@@ -110,6 +112,9 @@ static int xfer(const uint8_t *tx, uint8_t *rx, size_t n)
 	gpio_pin_set_dt(&g_nss, 1);
 	rc = spi_transceive(spi_dev, &spi_cfg, &txs, rx ? &rxs : NULL);
 	gpio_pin_set_dt(&g_nss, 0);
+	if (rc) {
+		st.spi_faults++;
+	}
 	return rc;
 }
 
@@ -193,6 +198,7 @@ static int set_rx(void)
 static void dio1_isr(const struct device *d, struct gpio_callback *cb, uint32_t pins)
 {
 	ARG_UNUSED(d); ARG_UNUSED(cb); ARG_UNUSED(pins);
+	st.dio1_irqs++;
 	if (notify) {
 		notify();
 	}
@@ -315,6 +321,7 @@ int mc_radio_init(void (*irq_notify)(void))
 	CK(gpio_pin_interrupt_configure_dt(&g_dio1, GPIO_INT_EDGE_TO_ACTIVE));
 
 	CK(set_rx());
+	st.up = true;
 	LOG_INF("radio up: %u Hz SF%u BW%u CR4/%u pre%u sync 0x%02x %d dBm",
 		hz, CONFIG_MC_SF, CONFIG_MC_BW_HZ, CONFIG_MC_CR, CONFIG_MC_PREAMBLE,
 		CONFIG_MC_SYNC_WORD, CONFIG_MC_TX_POWER_DBM);
@@ -329,7 +336,10 @@ int mc_radio_service(struct mc_radio_rx *rx)
 		return 0;
 	}
 	clear_irq(irq);
+	if (irq & IRQ_CRC_ERR) { st.rx_crc_err++; }
+	if (irq & IRQ_HDR_ERR) { st.rx_hdr_err++; }
 	if (!(irq & IRQ_RX_DONE) || (irq & (IRQ_CRC_ERR | IRQ_HDR_ERR))) {
+		if (!(irq & (IRQ_CRC_ERR | IRQ_HDR_ERR | IRQ_RX_DONE))) { st.rx_other++; }
 		return 0;
 	}
 
@@ -350,6 +360,10 @@ int mc_radio_service(struct mc_radio_rx *rx)
 	rx->len = bs[0];
 	rx->rssi_dbm = mc_sx_rssi_dbm(ps[0]);
 	rx->snr_q2 = mc_sx_snr_q2(ps[1]);
+	st.rx_ok++;
+	st.have_rx = true;
+	st.last_rssi_dbm = rx->rssi_dbm;
+	st.last_snr_q2 = rx->snr_q2;
 	return 1;
 }
 
@@ -410,6 +424,7 @@ int mc_radio_tx(const uint8_t *frame, size_t len)
 	}
 	if (!(irq & IRQ_TX_DONE)) {
 		LOG_ERR("TX did not complete");
+		st.tx_timeout++;
 		rc = -ETIMEDOUT;
 	}
 out:
@@ -420,9 +435,31 @@ out:
 	cmd_w(OP_SET_PKT_PARAMS, pkt, 6);
 	if (set_rx() != 0) {
 		LOG_ERR("could not return to RX after TX");
+		st.rx_restore_fail++;
 		if (rc == 0) {
 			rc = -EIO;
 		}
 	}
+	if (rc) {
+		st.tx_fail++;
+	} else {
+		st.tx_ok++;
+	}
 	return rc;
+}
+
+const struct mc_radio_stats *mc_radio_stats_get(void) { return &st; }
+
+void mc_radio_pins(int *busy, int *dio1, int *reset)
+{
+	*busy = gpio_pin_get_dt(&g_busy);
+	*dio1 = gpio_pin_get_dt(&g_dio1);
+	*reset = gpio_pin_get_dt(&g_reset);
+}
+
+bool mc_radio_hw_ready(void)
+{
+	return device_is_ready(spi_dev) && gpio_is_ready_dt(&g_reset) &&
+	       gpio_is_ready_dt(&g_busy) && gpio_is_ready_dt(&g_dio1) &&
+	       gpio_is_ready_dt(&g_rxen) && gpio_is_ready_dt(&g_nss);
 }
